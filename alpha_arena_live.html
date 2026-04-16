@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Alpha Arena | Live Market Data</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; background: #0b0e11; color: #eaecef; margin: 0; padding: 20px; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #2b2f36; padding-bottom: 15px; }
+        .live-indicator { color: #02c076; font-weight: bold; display: flex; align-items: center; }
+        .dot { height: 8px; width: 8px; background: #02c076; border-radius: 50%; margin-right: 8px; animation: blink 1s infinite; }
+        @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 20px; }
+        .card { background: #181a20; padding: 15px; border-radius: 8px; border: 1px solid #2b2f36; }
+        .card h4 { margin: 0; color: #848e9c; font-size: 12px; }
+        .card .val { font-size: 20px; margin-top: 5px; font-weight: bold; }
+        .chart-wrap { background: #181a20; padding: 20px; border-radius: 8px; border: 1px solid #2b2f36; height: 400px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h2>Alpha Arena <span style="color:#f0b90b">Real-Time Feed</span></h2>
+        <div class="live-indicator"><span class="dot"></span> BINANCE LIVE: BTC/USDT</div>
+    </div>
+
+    <div class="stats">
+        <div class="card"><h4>Live BTC Price</h4><div id="btc-price" class="val">Loading...</div></div>
+        <div class="card"><h4>Qwen 3 Max PnL</h4><div id="pnl-val" class="val" style="color:#02c076">+$0.00</div></div>
+        <div class="card"><h4>Trading Volume (24h)</h4><div class="val">$1.2B</div></div>
+    </div>
+
+    <div class="chart-wrap">
+        <canvas id="mainChart"></canvas>
+    </div>
+
+    <script>
+        const ctx = document.getElementById('mainChart').getContext('2d');
+        const btcEl = document.getElementById('btc-price');
+        const pnlEl = document.getElementById('pnl-val');
+        
+        let initialPrice = 0;
+        const chart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'Agent Performance (Live ROI)',
+                    borderColor: '#f0b90b',
+                    data: [],
+                    tension: 0.2,
+                    pointRadius: 0
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    x: { grid: { display: false }, ticks: { color: '#848e9c' } },
+                    y: { grid: { color: '#2b2f36' }, ticks: { color: '#848e9c' } }
+                }
+            }
+        });
+
+        // Connect to Binance Public WebSocket
+        const ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@ticker');
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            const price = parseFloat(data.c);
+            
+            if (initialPrice === 0) initialPrice = price;
+            
+            btcEl.innerText = `$${price.toLocaleString()}`;
+            
+            // Calculate simulated ROI based on actual market movement
+            const roi = ((price - initialPrice) / initialPrice) * 100;
+            const pnl = (10000 * (roi / 100)).toFixed(2);
+            
+            pnlEl.innerText = `${pnl >= 0 ? '+' : ''}$${pnl}`;
+            pnlEl.style.color = pnl >= 0 ? '#02c076' : '#f84960';
+
+            // Update Chart every "tick"
+            const time = new Date().toLocaleTimeString();
+            chart.data.labels.push(time);
+            chart.data.datasets[0].data.push(roi);
+
+            if (chart.data.labels.length > 50) {
+                chart.data.labels.shift();
+                chart.data.datasets[0].data.shift();
+            }
+            chart.update('none');
+        };
+
+        ws.onerror = (err) => console.error("WS Error:", err);
+    </script>
+</body>
+</html>
