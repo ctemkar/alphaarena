@@ -14,10 +14,10 @@ ENV = load_env()
 OR_KEY = ENV.get('OPENROUTER_API_KEY', '')
 PORT = 8000
 OLLAMA_TIMEOUT = 8
-ARENA_CYCLE_SECONDS = 4
+ARENA_CYCLE_SECONDS = 2
 MAX_LEVERAGE = 8
-TRADE_NOTIONAL_PCT = 0.35
-MIN_TRADE_NOTIONAL = 12.0
+TRADE_NOTIONAL_PCT = 0.75
+MIN_TRADE_NOTIONAL = 25.0
 SYMBOLS = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT", "XRP": "XRPUSDT", "BNB": "BNBUSDT", "DOGE": "DOGEUSDT"}
 LIVE_PRICES = {s: 0.0 for s in SYMBOLS}
 START_PRICES = {s: 0.0 for s in SYMBOLS}
@@ -50,6 +50,10 @@ def extract_decision(text):
     if "BUY" in upper:
         return "BUY"
     if "SELL" in upper:
+        return "SELL"
+    if "LONG" in upper:
+        return "BUY"
+    if "SHORT" in upper:
         return "SELL"
     return None
 
@@ -87,7 +91,17 @@ def request_model_text(bot, prompt):
 
 def get_model_decision(bot, prompt):
     first = request_model_text(bot, prompt)
-    return extract_decision(first)
+    decision = extract_decision(first)
+    if decision:
+        return decision
+
+    forced_prompt = (
+        prompt
+        + "\nYou must choose exactly one token from this set: BUY, SELL."
+        + "\nDo not output HOLD or explanation."
+    )
+    second = request_model_text(bot, forced_prompt)
+    return extract_decision(second)
 
 def reset_all_state():
     for b in ARENA_DATA.values():
@@ -170,7 +184,11 @@ def fetch_binance():
 def call_model(name):
     b = ARENA_DATA[name]
     try:
-        prompt = f"BTC values: {HISTORY[-10:]}. Respond with exactly one token: BUY or SELL. Do not output HOLD."
+        prompt = (
+            f"BTC values: {HISTORY[-10:]}. "
+            "Choose direction for the next tick. "
+            "Respond with exactly one token: BUY or SELL."
+        )
         decision = get_model_decision(b, prompt)
         if not decision:
             LOGS.append(f"{name}: HOLD")
@@ -243,7 +261,11 @@ def call_basket_model(name):
     b = BASKET_DATA[name]
     try:
         hist_summary = ", ".join(f"{s}: {BASKET_HISTORY[s][-5:]}" for s in SYMBOLS if BASKET_HISTORY[s])
-        prompt = f"Crypto basket prices (last 5 ticks): {hist_summary}. Trade the basket. Respond with exactly one token: BUY or SELL. Do not output HOLD."
+        prompt = (
+            f"Crypto basket prices (last 5 ticks): {hist_summary}. "
+            "Choose basket direction for the next tick. "
+            "Respond with exactly one token: BUY or SELL."
+        )
         decision = get_model_decision(b, prompt)
         if not decision:
             LOGS.append(f"BASKET {name}: HOLD")
