@@ -68,7 +68,7 @@ def request_model_text(bot, prompt):
                 "model": model,
                 "prompt": prompt,
                 "stream": False,
-                "options": {"num_predict": 1, "temperature": bot.get("temperature", 0.35)}
+                "options": {"num_predict": 6, "temperature": bot.get("temperature", 0.35)}
             }).encode()
         else:
             if not OR_KEY:
