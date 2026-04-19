@@ -483,6 +483,8 @@ HTML = """
         <div id="logs" style="font-size:10px; color:#848e9c; margin-top:10px;"></div>
     </main>
     <script>
+        let renderTick = 0;
+
         async function postActiveModels(payload) {
             try {
                 const r = await fetch('/active-models', {
@@ -522,18 +524,20 @@ HTML = """
 
         async function update() {
             try {
-                const r = await fetch('/data'); const d = await r.json();
+                const r = await fetch(`/data?ts=${Date.now()}`, { cache: 'no-store' });
+                const d = await r.json();
+                renderTick += 1;
                 const px = d.prices || {};
                 const btc = Number(px.BTC || 0);
                 const basketSymbols = ['BTC', 'ETH', 'SOL', 'XRP', 'BNB', 'DOGE'];
-                const basketText = basketSymbols.map(s => `${s} ${Number(px[s] || 0).toFixed(2)}`).join(' | ');
+                const basketText = basketSymbols.map(s => `${s} ${Number(px[s] || 0).toFixed(4)}`).join(' | ');
                 const now = new Date().toLocaleTimeString();
                 const priceTs = Number(d.last_price_update_ts || 0);
                 const serverTs = Number(d.server_time || 0);
                 const age = priceTs > 0 && serverTs > 0 ? Math.max(0, serverTs - priceTs) : NaN;
                 const ageText = Number.isFinite(age) ? `${age.toFixed(1)}s ago` : '--';
-                document.getElementById('s1meta').innerText = `BTC: ${btc ? btc.toFixed(2) : '--'} | Market refresh: ${ageText} | Last render: ${now}`;
-                document.getElementById('s2meta').innerText = `${basketText} | Market refresh: ${ageText} | Last render: ${now}`;
+                document.getElementById('s1meta').innerText = `BTC: ${btc ? btc.toFixed(4) : '--'} | Market refresh: ${ageText} | Last render: ${now} | Tick: ${renderTick}`;
+                document.getElementById('s2meta').innerText = `${basketText} | Market refresh: ${ageText} | Last render: ${now} | Tick: ${renderTick}`;
                 let bActiveH="", bPausedH="", bS=0;
                 let bPnl=0, bCount=0;
                 Object.entries(d.bots).forEach(([n,b])=>{
