@@ -30,16 +30,16 @@ OLLAMA_MODELS_TS = 0.0
 MODEL_SEMAPHORE = threading.Semaphore(1)
 
 ARENA_DATA = {
-    "Qwen2.5-Coder (7B)": {"bal": 100.0, "pos": 0, "color": "#6366f1", "provider": "ollama", "model": "phi3:latest", "temperature": 0.25, "busy": False},
-    "DeepSeek-R1 (8B)": {"bal": 100.0, "pos": 0, "color": "#67e8f9", "provider": "ollama", "model": "deepseek-r1:8b", "temperature": 0.45, "busy": False},
-    "Llama 3.2 (3B)": {"bal": 100.0, "pos": 0, "color": "#10a37f", "provider": "ollama", "model": "llama3.2:3b", "temperature": 0.60, "busy": False},
-    "Mistral (7B)": {"bal": 100.0, "pos": 0, "color": "#f0b90b", "provider": "ollama", "model": "llama3:latest", "temperature": 0.35, "busy": False},
-    "Gemma 4": {"bal": 100.0, "pos": 0, "color": "#34d399", "provider": "ollama", "model": "phi3:latest", "temperature": 0.55, "busy": False}
+    "Qwen2.5-Coder (7B)": {"bal": 100.0, "pos": 0, "color": "#6366f1", "provider": "ollama", "model": "phi3:latest", "temperature": 0.25, "busy": False, "frozen_total": None},
+    "DeepSeek-R1 (8B)": {"bal": 100.0, "pos": 0, "color": "#67e8f9", "provider": "ollama", "model": "deepseek-r1:8b", "temperature": 0.45, "busy": False, "frozen_total": None},
+    "Llama 3.2 (3B)": {"bal": 100.0, "pos": 0, "color": "#10a37f", "provider": "ollama", "model": "llama3.2:3b", "temperature": 0.60, "busy": False, "frozen_total": None},
+    "Mistral (7B)": {"bal": 100.0, "pos": 0, "color": "#f0b90b", "provider": "ollama", "model": "llama3:latest", "temperature": 0.35, "busy": False, "frozen_total": None},
+    "Gemma 4": {"bal": 100.0, "pos": 0, "color": "#34d399", "provider": "ollama", "model": "phi3:latest", "temperature": 0.55, "busy": False, "frozen_total": None}
 }
 
 BASKET_HISTORY = {s: [] for s in SYMBOLS}
 BASKET_DATA = {
-    name: {"bal": 100.0, "pos": {s: 0.0 for s in SYMBOLS}, "color": d["color"], "provider": d["provider"], "model": d["model"], "temperature": d.get("temperature", 0.35), "busy": False}
+    name: {"bal": 100.0, "pos": {s: 0.0 for s in SYMBOLS}, "color": d["color"], "provider": d["provider"], "model": d["model"], "temperature": d.get("temperature", 0.35), "busy": False, "frozen_total": None}
     for name, d in ARENA_DATA.items()
 }
 ACTIVE_ARENA_MODELS = []
@@ -52,30 +52,17 @@ BASKET_IDX = 0
 def set_active_models(names, system):
     global ACTIVE_ARENA_MODELS, ACTIVE_BASKET_MODELS
     allowed = set(ARENA_DATA.keys())
-    old_arena = set(ACTIVE_ARENA_MODELS)
-    old_basket = set(ACTIVE_BASKET_MODELS)
     selected = [n for n in names if n in allowed]
     if system == "arena":
         ACTIVE_ARENA_MODELS = selected
         for n in ARENA_DATA:
             if n not in ACTIVE_ARENA_MODELS:
                 ARENA_DATA[n]["busy"] = False
-        removed = old_arena - set(ACTIVE_ARENA_MODELS)
-        for n in removed:
-            p = LIVE_PRICES.get("BTC", 0.0)
-            total = ARENA_DATA[n]["bal"] + (ARENA_DATA[n]["pos"] * p)
-            ARENA_DATA[n]["bal"] = total
-            ARENA_DATA[n]["pos"] = 0.0
     elif system == "basket":
         ACTIVE_BASKET_MODELS = selected
         for n in BASKET_DATA:
             if n not in ACTIVE_BASKET_MODELS:
                 BASKET_DATA[n]["busy"] = False
-        removed = old_basket - set(ACTIVE_BASKET_MODELS)
-        for n in removed:
-            total = BASKET_DATA[n]["bal"] + sum(BASKET_DATA[n]["pos"][s] * LIVE_PRICES.get(s, 0.0) for s in SYMBOLS)
-            BASKET_DATA[n]["bal"] = total
-            BASKET_DATA[n]["pos"] = {s: 0.0 for s in SYMBOLS}
 
 def toggle_active_model(name, system):
     if system == "arena":
@@ -207,11 +194,13 @@ def reset_all_state():
         b["bal"] = 100.0
         b["pos"] = 0
         b["busy"] = False
+        b["frozen_total"] = None
 
     for b in BASKET_DATA.values():
         b["bal"] = 100.0
         b["pos"] = {s: 0.0 for s in SYMBOLS}
         b["busy"] = False
+        b["frozen_total"] = None
 
     LOGS.clear()
     LOGS.append("SYSTEM RESET: all bots back to $100")
@@ -457,8 +446,10 @@ class H(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         route = self.path.split('?', 1)[0]
         if route == '/data':
-            for b in ARENA_DATA.values(): b["total"] = b["bal"] + (b["pos"] * LIVE_PRICES["BTC"])
-            for b in BASKET_DATA.values(): b["total"] = b["bal"] + sum(b["pos"][s] * LIVE_PRICES[s] for s in SYMBOLS)
+            for b in ARENA_DATA.values():
+                b["total"] = b["bal"] + (b["pos"] * LIVE_PRICES["BTC"])
+            for b in BASKET_DATA.values():
+                b["total"] = b["bal"] + sum(b["pos"][s] * LIVE_PRICES[s] for s in SYMBOLS)
             self.send_response(200)
             self.send_header('Content-type','application/json')
             self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
