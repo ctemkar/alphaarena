@@ -442,7 +442,8 @@ class H(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
 
     def do_GET(self):
-        if self.path == '/data':
+        route = self.path.split('?', 1)[0]
+        if route == '/data':
             for b in ARENA_DATA.values(): b["total"] = b["bal"] + (b["pos"] * LIVE_PRICES["BTC"])
             for b in BASKET_DATA.values(): b["total"] = b["bal"] + sum(b["pos"][s] * LIVE_PRICES[s] for s in SYMBOLS)
             self.send_response(200)
