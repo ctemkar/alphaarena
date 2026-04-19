@@ -400,11 +400,11 @@ HTML = """
     .summary { background:#1e2329; border-radius:10px; padding:15px; border:2px solid #02c076; width:220px; }
 </style></head><body>
     <aside class="sidebar">
-        <div style="font-size:13px; font-weight:700; margin-bottom:10px; color:#f0b90b;">CONTROLS</div>
-        <button class="btn" onclick="resetArena()">Reset To $100</button>
         <div style="font-size:12px; font-weight:700; margin:14px 0 8px; color:#02c076;">Active Models</div>
         <div id="modelToggles" class="side-note"></div>
         <button class="btn" style="margin-top:10px; background:#02c076;" onclick="saveActiveModels()">Apply Model Selection</button>
+        <div style="font-size:13px; font-weight:700; margin:14px 0 10px; color:#f0b90b;">CONTROLS</div>
+        <button class="btn" onclick="resetArena()">Reset To $100</button>
         <div id="resetStatus" class="side-note"></div>
     </aside>
     <main class="content">
@@ -460,27 +460,39 @@ HTML = """
                 const r = await fetch('/data'); const d = await r.json();
                 renderModelToggles(d);
                 let bH="", bS=0;
+                let bPnl=0;
                 Object.entries(d.bots).forEach(([n,b])=>{
+                    const active = (d.active_models || []).includes(n);
+                    const state = active ? 'ACTIVE' : 'PAUSED';
                     bH+=`<div class="card" style="border-color:${b.color}">
                         <div style="font-size:9px;opacity:0.5">${b.provider}</div>
                         <div style="color:${b.color};font-weight:bold">${n}</div>
+                        <div style="font-size:9px;color:${active ? '#02c076' : '#848e9c'}">${state}</div>
                         <div class="total">$${b.total.toFixed(2)}</div>
                     </div>`;
                     bS+=b.total;
+                    bPnl += (b.total - 100);
                 });
-                bH+=`<div class="summary"><div style="font-size:24px;color:#02c076">$${bS.toFixed(2)}</div><div>ARENA TOTAL</div></div>`;
+                const bAvgPnl = Object.keys(d.bots || {}).length ? (bPnl / Object.keys(d.bots).length) : 0;
+                bH+=`<div class="summary"><div style="font-size:24px;color:#02c076">$${bS.toFixed(2)}</div><div>ARENA TOTAL</div><div style="font-size:11px;color:#848e9c;margin-top:6px;">AVG P&L: $${bAvgPnl.toFixed(2)}</div></div>`;
                 document.getElementById('ba').innerHTML=bH;
 
                 let cH="", cS=0;
+                let cPnl=0;
                 Object.entries(d.basket_bots).forEach(([n,b])=>{
+                    const active = (d.active_models || []).includes(n);
+                    const state = active ? 'ACTIVE' : 'PAUSED';
                     cH+=`<div class="card" style="border-color:${b.color}">
                         <div style="font-size:9px;opacity:0.5">${b.provider}</div>
                         <div style="color:${b.color};font-weight:bold">${n}</div>
+                        <div style="font-size:9px;color:${active ? '#02c076' : '#848e9c'}">${state}</div>
                         <div class="total">$${b.total.toFixed(2)}</div>
                     </div>`;
                     cS+=b.total;
+                    cPnl += (b.total - 100);
                 });
-                cH+=`<div class="summary"><div style="font-size:24px;color:#02c076">$${cS.toFixed(2)}</div><div>BASKET TOTAL</div></div>`;
+                const cAvgPnl = Object.keys(d.basket_bots || {}).length ? (cPnl / Object.keys(d.basket_bots).length) : 0;
+                cH+=`<div class="summary"><div style="font-size:24px;color:#02c076">$${cS.toFixed(2)}</div><div>BASKET TOTAL</div><div style="font-size:11px;color:#848e9c;margin-top:6px;">AVG P&L: $${cAvgPnl.toFixed(2)}</div></div>`;
                 document.getElementById('ca').innerHTML=cH;
                 document.getElementById('logs').innerText = d.logs.join(" | ");
             } catch(e) {}
