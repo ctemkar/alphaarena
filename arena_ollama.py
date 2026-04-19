@@ -565,12 +565,14 @@ HTML = """
                     const active = (d.active_arena_models || []).includes(n);
                     const state = active ? 'ACTIVE' : 'PAUSED';
                     const pnl = (b.total - 100);
+                    const btcLive = Number(px.BTC || 0).toFixed(2);
                     const card = `<div class="card" style="border-color:${b.color}; cursor:pointer;${active ? '' : ' width:150px; padding:9px; opacity:0.92;'}" onclick="toggleModel('arena','${n.replace(/'/g, "&#39;")}')">
                         <div style="font-size:9px;opacity:0.5">${b.provider}</div>
                         <div style="color:${b.color};font-weight:bold">${n}</div>
                         <div style="font-size:9px;color:${active ? '#02c076' : '#848e9c'}">${state}</div>
                         <div class="total">$${b.total.toFixed(2)}</div>
                         <div style="font-size:10px;color:${pnl >= 0 ? '#02c076' : '#f6465d'}">P&L: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</div>
+                        <div style="font-size:9px;color:#9aa4b2;">BTC: ${btcLive} | #${seq} | T${renderTick}</div>
                     </div>`;
                     if (active) {
                         bActiveH += card;
@@ -598,12 +600,14 @@ HTML = """
                     const active = (d.active_basket_models || []).includes(n);
                     const state = active ? 'ACTIVE' : 'PAUSED';
                     const pnl = (b.total - 100);
+                    const basketLive = `B:${Number(px.BTC || 0).toFixed(1)} E:${Number(px.ETH || 0).toFixed(1)} S:${Number(px.SOL || 0).toFixed(2)}`;
                     const card = `<div class="card" style="border-color:${b.color}; cursor:pointer;${active ? '' : ' width:150px; padding:9px; opacity:0.92;'}" onclick="toggleModel('basket','${n.replace(/'/g, "&#39;")}')">
                         <div style="font-size:9px;opacity:0.5">${b.provider}</div>
                         <div style="color:${b.color};font-weight:bold">${n}</div>
                         <div style="font-size:9px;color:${active ? '#02c076' : '#848e9c'}">${state}</div>
                         <div class="total">$${b.total.toFixed(2)}</div>
                         <div style="font-size:10px;color:${pnl >= 0 ? '#02c076' : '#f6465d'}">P&L: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</div>
+                        <div style="font-size:9px;color:#9aa4b2;">${basketLive} | #${seq} | T${renderTick}</div>
                     </div>`;
                     if (active) {
                         cActiveH += card;
