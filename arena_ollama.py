@@ -17,7 +17,7 @@ OLLAMA_TIMEOUT = 8
 ARENA_CYCLE_SECONDS = 1
 MAX_LEVERAGE = 20
 TRADE_NOTIONAL_PCT = 1.5
-MIN_TRADE_NOTIONAL = 50.0
+MIN_TRADE_NOTIONAL = 80.0
 SYMBOLS = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT", "XRP": "XRPUSDT", "BNB": "BNBUSDT", "DOGE": "DOGEUSDT"}
 LIVE_PRICES = {s: 0.0 for s in SYMBOLS}
 START_PRICES = {s: 0.0 for s in SYMBOLS}
@@ -40,10 +40,20 @@ BASKET_DATA = {
     name: {"bal": 100.0, "pos": {s: 0.0 for s in SYMBOLS}, "color": d["color"], "provider": d["provider"], "model": d["model"], "temperature": d.get("temperature", 0.35), "busy": False}
     for name, d in ARENA_DATA.items()
 }
+ACTIVE_MODELS = list(ARENA_DATA.keys())
 ARENA_ORDER = list(ARENA_DATA.keys())
 BASKET_ORDER = list(BASKET_DATA.keys())
 ARENA_IDX = 0
 BASKET_IDX = 0
+
+def set_active_models(names):
+    global ACTIVE_MODELS
+    allowed = set(ARENA_DATA.keys())
+    ACTIVE_MODELS = [n for n in names if n in allowed]
+    for n in ARENA_DATA:
+        if n not in ACTIVE_MODELS:
+            ARENA_DATA[n]["busy"] = False
+            BASKET_DATA[n]["busy"] = False
 
 def extract_decision(text):
     upper = (text or "").strip().upper()
@@ -90,18 +100,29 @@ def request_model_text(bot, prompt):
             return res["response"] if bot["provider"] == "ollama" else res["choices"][0]["message"]["content"]
 
 def get_model_decision(bot, prompt):
-    first = request_model_text(bot, prompt)
-    decision = extract_decision(first)
-    if decision:
-        return decision
-
-    forced_prompt = (
+    attempts = [
+        prompt,
         prompt
         + "\nYou must choose exactly one token from this set: BUY, SELL."
-        + "\nDo not output HOLD or explanation."
-    )
-    second = request_model_text(bot, forced_prompt)
-    return extract_decision(second)
+        + "\nDo not output HOLD or explanation.",
+        prompt
+        + "\nFinal attempt: output exactly BUY or SELL (single token, uppercase).",
+    ]
+
+    last_text = ""
+    for attempt_prompt in attempts:
+        last_text = request_model_text(bot, attempt_prompt)
+        decision = extract_decision(last_text)
+        if decision:
+            return decision
+
+    # Keep decision LLM-driven by inferring intent words from the final model response.
+    upper = (last_text or "").upper()
+    if any(w in upper for w in ["BULL", "UP", "LONG", "RISE"]):
+        return "BUY"
+    if any(w in upper for w in ["BEAR", "DOWN", "SHORT", "DROP"]):
+        return "SELL"
+    return None
 
 def reset_all_state():
     for b in ARENA_DATA.values():
@@ -251,7 +272,7 @@ def arena_loop():
         if ARENA_ORDER:
             name = ARENA_ORDER[ARENA_IDX % len(ARENA_ORDER)]
             ARENA_IDX += 1
-            if not ARENA_DATA[name]["busy"]:
+            if name in ACTIVE_MODELS and not ARENA_DATA[name]["busy"]:
                 ARENA_DATA[name]["busy"] = True
                 run_bot_cycle(name)
         if len(LOGS) > 120: LOGS.pop(0)
@@ -317,7 +338,7 @@ def basket_loop():
         if BASKET_ORDER:
             name = BASKET_ORDER[BASKET_IDX % len(BASKET_ORDER)]
             BASKET_IDX += 1
-            if not BASKET_DATA[name]["busy"]:
+            if name in ACTIVE_MODELS and not BASKET_DATA[name]["busy"]:
                 BASKET_DATA[name]["busy"] = True
                 call_basket_model(name)
         time.sleep(ARENA_CYCLE_SECONDS)
@@ -330,6 +351,24 @@ class H(http.server.SimpleHTTPRequestHandler):
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({"ok": True}).encode())
+        elif self.path == '/active-models':
+            length = int(self.headers.get('Content-Length', '0'))
+            raw = self.rfile.read(length).decode() if length > 0 else '{}'
+            try:
+                payload = json.loads(raw)
+                names = payload.get('active_models', [])
+                if not isinstance(names, list):
+                    raise ValueError('active_models must be a list')
+                set_active_models(names)
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"ok": True, "active_models": ACTIVE_MODELS}).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"ok": False, "error": str(e)}).encode())
         else:
             self.send_response(404)
             self.end_headers()
@@ -339,7 +378,7 @@ class H(http.server.SimpleHTTPRequestHandler):
             for b in ARENA_DATA.values(): b["total"] = b["bal"] + (b["pos"] * LIVE_PRICES["BTC"])
             for b in BASKET_DATA.values(): b["total"] = b["bal"] + sum(b["pos"][s] * LIVE_PRICES[s] for s in SYMBOLS)
             self.send_response(200); self.send_header('Content-type','application/json'); self.end_headers()
-            self.wfile.write(json.dumps({"prices":LIVE_PRICES, "bots":ARENA_DATA, "basket_bots":BASKET_DATA, "logs":LOGS}).encode())
+            self.wfile.write(json.dumps({"prices":LIVE_PRICES, "bots":ARENA_DATA, "basket_bots":BASKET_DATA, "active_models":ACTIVE_MODELS, "model_names":list(ARENA_DATA.keys()), "logs":LOGS}).encode())
         else:
             self.send_response(200); self.send_header('Content-type','text/html'); self.end_headers()
             self.wfile.write(HTML.encode())
@@ -363,6 +402,9 @@ HTML = """
     <aside class="sidebar">
         <div style="font-size:13px; font-weight:700; margin-bottom:10px; color:#f0b90b;">CONTROLS</div>
         <button class="btn" onclick="resetArena()">Reset To $100</button>
+        <div style="font-size:12px; font-weight:700; margin:14px 0 8px; color:#02c076;">Active Models</div>
+        <div id="modelToggles" class="side-note"></div>
+        <button class="btn" style="margin-top:10px; background:#02c076;" onclick="saveActiveModels()">Apply Model Selection</button>
         <div id="resetStatus" class="side-note"></div>
     </aside>
     <main class="content">
@@ -374,6 +416,31 @@ HTML = """
         <div id="logs" style="font-size:10px; color:#848e9c; margin-top:10px;"></div>
     </main>
     <script>
+        function renderModelToggles(d) {
+            const host = document.getElementById('modelToggles');
+            const active = new Set(d.active_models || []);
+            host.innerHTML = (d.model_names || []).map((n, i) => {
+                const checked = active.has(n) ? 'checked' : '';
+                return `<label style="display:block; margin:5px 0;"><input type="checkbox" value="${n}" ${checked} id="m_${i}"> ${n}</label>`;
+            }).join('');
+        }
+
+        async function saveActiveModels() {
+            try {
+                const selected = Array.from(document.querySelectorAll('#modelToggles input[type="checkbox"]:checked')).map(x => x.value);
+                const r = await fetch('/active-models', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({active_models: selected})
+                });
+                const d = await r.json();
+                document.getElementById('resetStatus').innerText = d.ok ? 'Model selection updated' : 'Update failed';
+                await update();
+            } catch(e) {
+                document.getElementById('resetStatus').innerText = 'Update failed';
+            }
+        }
+
         async function resetArena() {
             try {
                 const r = await fetch('/reset', { method: 'POST' });
@@ -391,6 +458,7 @@ HTML = """
         async function update() {
             try {
                 const r = await fetch('/data'); const d = await r.json();
+                renderModelToggles(d);
                 let bH="", bS=0;
                 Object.entries(d.bots).forEach(([n,b])=>{
                     bH+=`<div class="card" style="border-color:${b.color}">
