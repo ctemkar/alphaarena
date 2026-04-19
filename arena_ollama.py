@@ -481,6 +481,7 @@ HTML = """
     <aside class="sidebar">
         <div style="font-size:13px; font-weight:700; margin:14px 0 10px; color:#f0b90b;">CONTROLS</div>
         <div class="side-note">Click any model card to move it between paused (top) and selected (active).</div>
+        <div id="heartbeat" class="side-note">Heartbeat: --</div>
         <button class="btn" onclick="resetArena()">Reset To $100</button>
         <div id="resetStatus" class="side-note"></div>
     </aside>
@@ -496,6 +497,12 @@ HTML = """
     </main>
     <script>
         let renderTick = 0;
+
+        function updateHeartbeat() {
+            const t = new Date();
+            const dot = (t.getSeconds() % 2 === 0) ? '●' : '○';
+            document.getElementById('heartbeat').innerText = `Heartbeat ${dot} ${t.toLocaleTimeString()}`;
+        }
 
         async function postActiveModels(payload) {
             try {
@@ -624,7 +631,11 @@ HTML = """
             ['setInterval(()=>postMessage(1),1000)'],
             {type:'application/javascript'}
         )));
-        timerWorker.onmessage = update;
+        timerWorker.onmessage = () => {
+            updateHeartbeat();
+            update();
+        };
+        updateHeartbeat();
         document.addEventListener('visibilitychange', () => { if (!document.hidden) update(); });
     </script></body></html>
 """
