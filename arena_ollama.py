@@ -21,6 +21,7 @@ MIN_TRADE_NOTIONAL = 80.0
 SYMBOLS = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT", "XRP": "XRPUSDT", "BNB": "BNBUSDT", "DOGE": "DOGEUSDT"}
 LIVE_PRICES = {s: 0.0 for s in SYMBOLS}
 START_PRICES = {s: 0.0 for s in SYMBOLS}
+LAST_PRICE_UPDATE_TS = 0.0
 HISTORY = []
 LOGS = []
 OLLAMA_MODELS = []
@@ -246,7 +247,7 @@ def resolve_ollama_model(target):
     return family[0]
 
 def fetch_binance():
-    global START_PRICES
+    global START_PRICES, LAST_PRICE_UPDATE_TS
     while True:
         try:
             url = "https://api.binance.com/api/v3/ticker/price"
@@ -262,6 +263,7 @@ def fetch_binance():
                 for s in SYMBOLS:
                     BASKET_HISTORY[s].append(LIVE_PRICES[s])
                     if len(BASKET_HISTORY[s]) > 30: BASKET_HISTORY[s].pop(0)
+                LAST_PRICE_UPDATE_TS = time.time()
         except: pass
         time.sleep(1)
 
@@ -442,7 +444,7 @@ class H(http.server.SimpleHTTPRequestHandler):
             for b in ARENA_DATA.values(): b["total"] = b["bal"] + (b["pos"] * LIVE_PRICES["BTC"])
             for b in BASKET_DATA.values(): b["total"] = b["bal"] + sum(b["pos"][s] * LIVE_PRICES[s] for s in SYMBOLS)
             self.send_response(200); self.send_header('Content-type','application/json'); self.end_headers()
-            self.wfile.write(json.dumps({"prices":LIVE_PRICES, "bots":ARENA_DATA, "basket_bots":BASKET_DATA, "active_arena_models":ACTIVE_ARENA_MODELS, "active_basket_models":ACTIVE_BASKET_MODELS, "model_names":list(ARENA_DATA.keys()), "logs":LOGS}).encode())
+            self.wfile.write(json.dumps({"prices":LIVE_PRICES, "bots":ARENA_DATA, "basket_bots":BASKET_DATA, "active_arena_models":ACTIVE_ARENA_MODELS, "active_basket_models":ACTIVE_BASKET_MODELS, "model_names":list(ARENA_DATA.keys()), "last_price_update_ts":LAST_PRICE_UPDATE_TS, "server_time":time.time(), "logs":LOGS}).encode())
         else:
             self.send_response(200); self.send_header('Content-type','text/html'); self.end_headers()
             self.wfile.write(HTML.encode())
@@ -458,6 +460,7 @@ HTML = """
     .btn { width:100%; background:#f0b90b; color:#111; border:0; border-radius:8px; padding:10px; font-weight:700; cursor:pointer; }
     .btn:active { transform:translateY(1px); }
     .side-note { margin-top:10px; font-size:11px; color:#848e9c; line-height:1.4; }
+    .meta { font-size:11px; color:#9aa4b2; margin:-4px 0 10px; }
     .grid { display:flex; justify-content:center; gap:8px; flex-wrap:wrap; margin-bottom:20px; }
     .card { background:#181a20; border-radius:10px; padding:12px; border-bottom:4px solid; width:170px; }
     .total { font-size:24px; font-weight:900; font-family:monospace; color:#f0b90b; }
@@ -471,9 +474,11 @@ HTML = """
     </aside>
     <main class="content">
         <h3 style="color:#f0b90b">SYSTEM 1: AI ARENA (OLLAMA + CLOUD)</h3>
+        <div id="s1meta" class="meta">BTC: -- | Last update: --</div>
         <div id="ba" class="grid"></div>
         <hr style="border:0; border-top:1px solid #2b2f36; margin:20px 0;">
         <h3 style="color:#02c076">SYSTEM 2: CRYPTO BASKET</h3>
+        <div id="s2meta" class="meta">BTC/ETH/SOL/XRP/BNB/DOGE: -- | Last update: --</div>
         <div id="ca" class="grid"></div>
         <div id="logs" style="font-size:10px; color:#848e9c; margin-top:10px;"></div>
     </main>
@@ -518,6 +523,17 @@ HTML = """
         async function update() {
             try {
                 const r = await fetch('/data'); const d = await r.json();
+                const px = d.prices || {};
+                const btc = Number(px.BTC || 0);
+                const basketSymbols = ['BTC', 'ETH', 'SOL', 'XRP', 'BNB', 'DOGE'];
+                const basketText = basketSymbols.map(s => `${s} ${Number(px[s] || 0).toFixed(2)}`).join(' | ');
+                const now = new Date().toLocaleTimeString();
+                const priceTs = Number(d.last_price_update_ts || 0);
+                const serverTs = Number(d.server_time || 0);
+                const age = priceTs > 0 && serverTs > 0 ? Math.max(0, serverTs - priceTs) : NaN;
+                const ageText = Number.isFinite(age) ? `${age.toFixed(1)}s ago` : '--';
+                document.getElementById('s1meta').innerText = `BTC: ${btc ? btc.toFixed(2) : '--'} | Market refresh: ${ageText} | Last render: ${now}`;
+                document.getElementById('s2meta').innerText = `${basketText} | Market refresh: ${ageText} | Last render: ${now}`;
                 let bActiveH="", bPausedH="", bS=0;
                 let bPnl=0, bCount=0;
                 Object.entries(d.bots).forEach(([n,b])=>{
