@@ -543,11 +543,11 @@ HTML = """
                 const bAvgPnl = bCount ? (bPnl / bCount) : 0;
                 let bH = "";
                 if (bPausedH) {
-                    bH += `<div style="width:100%; font-size:11px; color:#848e9c; text-align:left; max-width:1100px; margin:0 auto 6px;">PAUSED (TOP ROW, NOT IN TOTAL)</div>`;
-                    bH += bPausedH;
-                    bH += `<div style="width:100%; height:8px;"></div>`;
+                    bH += `<div style="width:100%; max-width:1100px; margin:0 auto 4px; font-size:11px; color:#848e9c; text-align:left;">PAUSED (TOP ROW, NOT IN TOTAL)</div>`;
+                    bH += `<div style="width:100%; max-width:1100px; margin:0 auto 8px; display:flex; justify-content:center; gap:8px; flex-wrap:wrap;">${bPausedH}</div>`;
                 }
-                bH += bActiveH;
+                bH += `<div style="width:100%; max-width:1100px; margin:0 auto 4px; font-size:11px; color:#9aa4b2; text-align:left;">SELECTED (IN TOTAL)</div>`;
+                bH += `<div style="width:100%; max-width:1100px; margin:0 auto 8px; display:flex; justify-content:center; gap:8px; flex-wrap:wrap; min-height:86px;">${bActiveH || '<div style="font-size:11px; color:#848e9c; align-self:center;">Click a paused card to select it</div>'}</div>`;
                 bH+=`<div class="summary"><div style="font-size:24px;color:#02c076">$${bS.toFixed(2)}</div><div>ARENA TOTAL (ACTIVE)</div><div style="font-size:11px;color:#848e9c;margin-top:6px;">AVG P&L: $${bAvgPnl.toFixed(2)}</div></div>`;
                 document.getElementById('ba').innerHTML=bH;
 
@@ -576,11 +576,11 @@ HTML = """
                 const cAvgPnl = cCount ? (cPnl / cCount) : 0;
                 let cH = "";
                 if (cPausedH) {
-                    cH += `<div style="width:100%; font-size:11px; color:#848e9c; text-align:left; max-width:1100px; margin:0 auto 6px;">PAUSED (TOP ROW, NOT IN TOTAL)</div>`;
-                    cH += cPausedH;
-                    cH += `<div style="width:100%; height:8px;"></div>`;
+                    cH += `<div style="width:100%; max-width:1100px; margin:0 auto 4px; font-size:11px; color:#848e9c; text-align:left;">PAUSED (TOP ROW, NOT IN TOTAL)</div>`;
+                    cH += `<div style="width:100%; max-width:1100px; margin:0 auto 8px; display:flex; justify-content:center; gap:8px; flex-wrap:wrap;">${cPausedH}</div>`;
                 }
-                cH += cActiveH;
+                cH += `<div style="width:100%; max-width:1100px; margin:0 auto 4px; font-size:11px; color:#9aa4b2; text-align:left;">SELECTED (IN TOTAL)</div>`;
+                cH += `<div style="width:100%; max-width:1100px; margin:0 auto 8px; display:flex; justify-content:center; gap:8px; flex-wrap:wrap; min-height:86px;">${cActiveH || '<div style="font-size:11px; color:#848e9c; align-self:center;">Click a paused card to select it</div>'}</div>`;
                 cH+=`<div class="summary"><div style="font-size:24px;color:#02c076">$${cS.toFixed(2)}</div><div>BASKET TOTAL (ACTIVE)</div><div style="font-size:11px;color:#848e9c;margin-top:6px;">AVG P&L: $${cAvgPnl.toFixed(2)}</div></div>`;
                 document.getElementById('ca').innerHTML=cH;
                 document.getElementById('logs').innerText = d.logs.join(" | ");
