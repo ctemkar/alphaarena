@@ -52,17 +52,30 @@ BASKET_IDX = 0
 def set_active_models(names, system):
     global ACTIVE_ARENA_MODELS, ACTIVE_BASKET_MODELS
     allowed = set(ARENA_DATA.keys())
+    old_arena = set(ACTIVE_ARENA_MODELS)
+    old_basket = set(ACTIVE_BASKET_MODELS)
     selected = [n for n in names if n in allowed]
     if system == "arena":
         ACTIVE_ARENA_MODELS = selected
         for n in ARENA_DATA:
             if n not in ACTIVE_ARENA_MODELS:
                 ARENA_DATA[n]["busy"] = False
+        removed = old_arena - set(ACTIVE_ARENA_MODELS)
+        for n in removed:
+            p = LIVE_PRICES.get("BTC", 0.0)
+            total = ARENA_DATA[n]["bal"] + (ARENA_DATA[n]["pos"] * p)
+            ARENA_DATA[n]["bal"] = total
+            ARENA_DATA[n]["pos"] = 0.0
     elif system == "basket":
         ACTIVE_BASKET_MODELS = selected
         for n in BASKET_DATA:
             if n not in ACTIVE_BASKET_MODELS:
                 BASKET_DATA[n]["busy"] = False
+        removed = old_basket - set(ACTIVE_BASKET_MODELS)
+        for n in removed:
+            total = BASKET_DATA[n]["bal"] + sum(BASKET_DATA[n]["pos"][s] * LIVE_PRICES.get(s, 0.0) for s in SYMBOLS)
+            BASKET_DATA[n]["bal"] = total
+            BASKET_DATA[n]["pos"] = {s: 0.0 for s in SYMBOLS}
 
 def toggle_active_model(name, system):
     if system == "arena":
@@ -559,8 +572,8 @@ HTML = """
                 const ageText = Number.isFinite(age) ? `${age.toFixed(1)}s ago` : '--';
                 document.getElementById('s1meta').innerText = `BTC: ${btc ? btc.toFixed(4) : '--'} | Feed #${seq} | Market refresh: ${ageText} | Last render: ${now} | Tick: ${renderTick}`;
                 document.getElementById('s2meta').innerText = `${basketText} | Feed #${seq} | Market refresh: ${ageText} | Last render: ${now} | Tick: ${renderTick}`;
-                let bActiveH="", bPausedH="", bS=0;
-                let bPnl=0, bCount=0;
+                let bActiveH="", bPausedH="", bS=0, bAll=0;
+                let bPnl=0, bCount=0, bAllPnl=0, bAllCount=0;
                 Object.entries(d.bots).forEach(([n,b])=>{
                     const active = (d.active_arena_models || []).includes(n);
                     const state = active ? 'ACTIVE' : 'PAUSED';
@@ -574,6 +587,9 @@ HTML = """
                         <div style="font-size:10px;color:${pnl >= 0 ? '#02c076' : '#f6465d'}">P&L: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</div>
                         <div style="font-size:9px;color:#9aa4b2;">BTC: ${btcLive} | #${seq} | T${renderTick}</div>
                     </div>`;
+                    bAll += b.total;
+                    bAllPnl += (b.total - 100);
+                    bAllCount += 1;
                     if (active) {
                         bActiveH += card;
                         bS += b.total;
@@ -584,6 +600,7 @@ HTML = """
                     }
                 });
                 const bAvgPnl = bCount ? (bPnl / bCount) : 0;
+                const bAllAvgPnl = bAllCount ? (bAllPnl / bAllCount) : 0;
                 let bH = "";
                 if (bPausedH) {
                     bH += `<div style="width:100%; max-width:1100px; margin:0 auto 4px; font-size:11px; color:#848e9c; text-align:left;">PAUSED (TOP ROW, NOT IN TOTAL)</div>`;
@@ -591,11 +608,11 @@ HTML = """
                 }
                 bH += `<div style="width:100%; max-width:1100px; margin:0 auto 4px; font-size:11px; color:#9aa4b2; text-align:left;">SELECTED (IN TOTAL)</div>`;
                 bH += `<div style="width:100%; max-width:1100px; margin:0 auto 8px; display:flex; justify-content:center; gap:8px; flex-wrap:wrap; min-height:86px;">${bActiveH || '<div style="font-size:11px; color:#848e9c; align-self:center;">Click a paused card to select it</div>'}</div>`;
-                bH+=`<div class="summary"><div style="font-size:24px;color:#02c076">$${bS.toFixed(2)}</div><div>ARENA TOTAL (ACTIVE)</div><div style="font-size:11px;color:#848e9c;margin-top:6px;">AVG P&L: $${bAvgPnl.toFixed(2)}</div></div>`;
+                bH+=`<div class="summary"><div style="font-size:24px;color:#02c076">$${bS.toFixed(2)}</div><div>ARENA TOTAL (ACTIVE ${bCount})</div><div style="font-size:11px;color:#848e9c;margin-top:6px;">AVG P&L (ACTIVE): $${bAvgPnl.toFixed(2)}</div><div style="font-size:11px;color:#9aa4b2;margin-top:4px;">ALL MODELS (${bAllCount}): $${bAll.toFixed(2)} | AVG: $${bAllAvgPnl.toFixed(2)}</div></div>`;
                 document.getElementById('ba').innerHTML=bH;
 
-                let cActiveH="", cPausedH="", cS=0;
-                let cPnl=0, cCount=0;
+                let cActiveH="", cPausedH="", cS=0, cAll=0;
+                let cPnl=0, cCount=0, cAllPnl=0, cAllCount=0;
                 Object.entries(d.basket_bots).forEach(([n,b])=>{
                     const active = (d.active_basket_models || []).includes(n);
                     const state = active ? 'ACTIVE' : 'PAUSED';
@@ -609,6 +626,9 @@ HTML = """
                         <div style="font-size:10px;color:${pnl >= 0 ? '#02c076' : '#f6465d'}">P&L: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</div>
                         <div style="font-size:9px;color:#9aa4b2;">${basketLive} | #${seq} | T${renderTick}</div>
                     </div>`;
+                    cAll += b.total;
+                    cAllPnl += (b.total - 100);
+                    cAllCount += 1;
                     if (active) {
                         cActiveH += card;
                         cS += b.total;
@@ -619,6 +639,7 @@ HTML = """
                     }
                 });
                 const cAvgPnl = cCount ? (cPnl / cCount) : 0;
+                const cAllAvgPnl = cAllCount ? (cAllPnl / cAllCount) : 0;
                 let cH = "";
                 if (cPausedH) {
                     cH += `<div style="width:100%; max-width:1100px; margin:0 auto 4px; font-size:11px; color:#848e9c; text-align:left;">PAUSED (TOP ROW, NOT IN TOTAL)</div>`;
@@ -626,7 +647,7 @@ HTML = """
                 }
                 cH += `<div style="width:100%; max-width:1100px; margin:0 auto 4px; font-size:11px; color:#9aa4b2; text-align:left;">SELECTED (IN TOTAL)</div>`;
                 cH += `<div style="width:100%; max-width:1100px; margin:0 auto 8px; display:flex; justify-content:center; gap:8px; flex-wrap:wrap; min-height:86px;">${cActiveH || '<div style="font-size:11px; color:#848e9c; align-self:center;">Click a paused card to select it</div>'}</div>`;
-                cH+=`<div class="summary"><div style="font-size:24px;color:#02c076">$${cS.toFixed(2)}</div><div>BASKET TOTAL (ACTIVE)</div><div style="font-size:11px;color:#848e9c;margin-top:6px;">AVG P&L: $${cAvgPnl.toFixed(2)}</div></div>`;
+                cH+=`<div class="summary"><div style="font-size:24px;color:#02c076">$${cS.toFixed(2)}</div><div>BASKET TOTAL (ACTIVE ${cCount})</div><div style="font-size:11px;color:#848e9c;margin-top:6px;">AVG P&L (ACTIVE): $${cAvgPnl.toFixed(2)}</div><div style="font-size:11px;color:#9aa4b2;margin-top:4px;">ALL MODELS (${cAllCount}): $${cAll.toFixed(2)} | AVG: $${cAllAvgPnl.toFixed(2)}</div></div>`;
                 document.getElementById('ca').innerHTML=cH;
                 document.getElementById('logs').innerText = d.logs.join(" | ");
             } catch(e) {}
