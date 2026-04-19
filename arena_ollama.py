@@ -22,6 +22,7 @@ SYMBOLS = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT", "XRP": "XRPUSDT
 LIVE_PRICES = {s: 0.0 for s in SYMBOLS}
 START_PRICES = {s: 0.0 for s in SYMBOLS}
 LAST_PRICE_UPDATE_TS = 0.0
+PRICE_SEQ = 0
 HISTORY = []
 LOGS = []
 OLLAMA_MODELS = []
@@ -247,7 +248,7 @@ def resolve_ollama_model(target):
     return family[0]
 
 def fetch_binance():
-    global START_PRICES, LAST_PRICE_UPDATE_TS
+    global START_PRICES, LAST_PRICE_UPDATE_TS, PRICE_SEQ
     while True:
         try:
             url = "https://api.binance.com/api/v3/ticker/price"
@@ -264,6 +265,7 @@ def fetch_binance():
                     BASKET_HISTORY[s].append(LIVE_PRICES[s])
                     if len(BASKET_HISTORY[s]) > 30: BASKET_HISTORY[s].pop(0)
                 LAST_PRICE_UPDATE_TS = time.time()
+                PRICE_SEQ += 1
         except: pass
         time.sleep(1)
 
@@ -443,10 +445,20 @@ class H(http.server.SimpleHTTPRequestHandler):
         if self.path == '/data':
             for b in ARENA_DATA.values(): b["total"] = b["bal"] + (b["pos"] * LIVE_PRICES["BTC"])
             for b in BASKET_DATA.values(): b["total"] = b["bal"] + sum(b["pos"][s] * LIVE_PRICES[s] for s in SYMBOLS)
-            self.send_response(200); self.send_header('Content-type','application/json'); self.end_headers()
-            self.wfile.write(json.dumps({"prices":LIVE_PRICES, "bots":ARENA_DATA, "basket_bots":BASKET_DATA, "active_arena_models":ACTIVE_ARENA_MODELS, "active_basket_models":ACTIVE_BASKET_MODELS, "model_names":list(ARENA_DATA.keys()), "last_price_update_ts":LAST_PRICE_UPDATE_TS, "server_time":time.time(), "logs":LOGS}).encode())
+            self.send_response(200)
+            self.send_header('Content-type','application/json')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
+            self.end_headers()
+            self.wfile.write(json.dumps({"prices":LIVE_PRICES, "bots":ARENA_DATA, "basket_bots":BASKET_DATA, "active_arena_models":ACTIVE_ARENA_MODELS, "active_basket_models":ACTIVE_BASKET_MODELS, "model_names":list(ARENA_DATA.keys()), "last_price_update_ts":LAST_PRICE_UPDATE_TS, "price_seq":PRICE_SEQ, "server_time":time.time(), "logs":LOGS}).encode())
         else:
-            self.send_response(200); self.send_header('Content-type','text/html'); self.end_headers()
+            self.send_response(200)
+            self.send_header('Content-type','text/html')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
+            self.end_headers()
             self.wfile.write(HTML.encode())
 
 class ReuseTCPServer(socketserver.TCPServer):
@@ -533,11 +545,12 @@ HTML = """
                 const basketText = basketSymbols.map(s => `${s} ${Number(px[s] || 0).toFixed(4)}`).join(' | ');
                 const now = new Date().toLocaleTimeString();
                 const priceTs = Number(d.last_price_update_ts || 0);
+                const seq = Number(d.price_seq || 0);
                 const serverTs = Number(d.server_time || 0);
                 const age = priceTs > 0 && serverTs > 0 ? Math.max(0, serverTs - priceTs) : NaN;
                 const ageText = Number.isFinite(age) ? `${age.toFixed(1)}s ago` : '--';
-                document.getElementById('s1meta').innerText = `BTC: ${btc ? btc.toFixed(4) : '--'} | Market refresh: ${ageText} | Last render: ${now} | Tick: ${renderTick}`;
-                document.getElementById('s2meta').innerText = `${basketText} | Market refresh: ${ageText} | Last render: ${now} | Tick: ${renderTick}`;
+                document.getElementById('s1meta').innerText = `BTC: ${btc ? btc.toFixed(4) : '--'} | Feed #${seq} | Market refresh: ${ageText} | Last render: ${now} | Tick: ${renderTick}`;
+                document.getElementById('s2meta').innerText = `${basketText} | Feed #${seq} | Market refresh: ${ageText} | Last render: ${now} | Tick: ${renderTick}`;
                 let bActiveH="", bPausedH="", bS=0;
                 let bPnl=0, bCount=0;
                 Object.entries(d.bots).forEach(([n,b])=>{
