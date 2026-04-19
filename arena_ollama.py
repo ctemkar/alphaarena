@@ -30,11 +30,14 @@ OLLAMA_MODELS_TS = 0.0
 MODEL_SEMAPHORE = threading.Semaphore(1)
 
 ARENA_DATA = {
-    "Qwen2.5-Coder (7B)": {"bal": 100.0, "pos": 0, "color": "#6366f1", "provider": "ollama", "model": "phi3:latest", "temperature": 0.25, "busy": False, "frozen_total": None},
+    "Qwen2.5-Coder (7B)": {"bal": 100.0, "pos": 0, "color": "#6366f1", "provider": "ollama", "model": "qwen3-coder:latest", "temperature": 0.25, "busy": False, "frozen_total": None},
     "DeepSeek-R1 (8B)": {"bal": 100.0, "pos": 0, "color": "#67e8f9", "provider": "ollama", "model": "deepseek-r1:8b", "temperature": 0.45, "busy": False, "frozen_total": None},
     "Llama 3.2 (3B)": {"bal": 100.0, "pos": 0, "color": "#10a37f", "provider": "ollama", "model": "llama3.2:3b", "temperature": 0.60, "busy": False, "frozen_total": None},
-    "Mistral (7B)": {"bal": 100.0, "pos": 0, "color": "#f0b90b", "provider": "ollama", "model": "llama3:latest", "temperature": 0.35, "busy": False, "frozen_total": None},
-    "Gemma 4": {"bal": 100.0, "pos": 0, "color": "#34d399", "provider": "ollama", "model": "phi3:latest", "temperature": 0.55, "busy": False, "frozen_total": None}
+    "Mistral (7B)": {"bal": 100.0, "pos": 0, "color": "#f0b90b", "provider": "ollama", "model": "mistral:latest", "temperature": 0.35, "busy": False, "frozen_total": None},
+    "Gemma 4": {"bal": 100.0, "pos": 0, "color": "#34d399", "provider": "ollama", "model": "gemma4:latest", "temperature": 0.55, "busy": False, "frozen_total": None},
+    "Qwen 3.5": {"bal": 100.0, "pos": 0, "color": "#8b5cf6", "provider": "ollama", "model": "qwen3.5:latest", "temperature": 0.30, "busy": False, "frozen_total": None},
+    "Llama 3 (8B)": {"bal": 100.0, "pos": 0, "color": "#fb7185", "provider": "ollama", "model": "llama3:latest", "temperature": 0.40, "busy": False, "frozen_total": None},
+    "Phi-3": {"bal": 100.0, "pos": 0, "color": "#22c55e", "provider": "ollama", "model": "phi3:latest", "temperature": 0.50, "busy": False, "frozen_total": None}
 }
 
 BASKET_HISTORY = {s: [] for s in SYMBOLS}
@@ -599,7 +602,7 @@ HTML = """
                 }
                 bH += `<div style="width:100%; max-width:1100px; margin:0 auto 4px; font-size:11px; color:#9aa4b2; text-align:left;">SELECTED (IN TOTAL)</div>`;
                 bH += `<div style="width:100%; max-width:1100px; margin:0 auto 8px; display:flex; justify-content:center; gap:8px; flex-wrap:wrap; min-height:86px;">${bActiveH || '<div style="font-size:11px; color:#848e9c; align-self:center;">Click a paused card to select it</div>'}</div>`;
-                bH+=`<div class="summary"><div style="font-size:24px;color:#02c076">$${bS.toFixed(2)}</div><div>ARENA TOTAL (ACTIVE ${bCount})</div><div style="font-size:11px;color:#848e9c;margin-top:6px;">AVG P&L (ACTIVE): $${bAvgPnl.toFixed(2)}</div><div style="font-size:11px;color:#9aa4b2;margin-top:4px;">ALL MODELS (${bAllCount}): $${bAll.toFixed(2)} | AVG: $${bAllAvgPnl.toFixed(2)}</div></div>`;
+                bH+=`<div class="summary"><div style="font-size:24px;color:#02c076">$${bAll.toFixed(2)}</div><div>ARENA TOTAL (ALL ${bAllCount})</div><div style="font-size:11px;color:#848e9c;margin-top:6px;">AVG P&L (ALL): $${bAllAvgPnl.toFixed(2)}</div><div style="font-size:11px;color:#9aa4b2;margin-top:4px;">ACTIVE (${bCount}): $${bS.toFixed(2)} | AVG: $${bAvgPnl.toFixed(2)}</div></div>`;
                 document.getElementById('ba').innerHTML=bH;
 
                 let cActiveH="", cPausedH="", cS=0, cAll=0;
@@ -638,7 +641,7 @@ HTML = """
                 }
                 cH += `<div style="width:100%; max-width:1100px; margin:0 auto 4px; font-size:11px; color:#9aa4b2; text-align:left;">SELECTED (IN TOTAL)</div>`;
                 cH += `<div style="width:100%; max-width:1100px; margin:0 auto 8px; display:flex; justify-content:center; gap:8px; flex-wrap:wrap; min-height:86px;">${cActiveH || '<div style="font-size:11px; color:#848e9c; align-self:center;">Click a paused card to select it</div>'}</div>`;
-                cH+=`<div class="summary"><div style="font-size:24px;color:#02c076">$${cS.toFixed(2)}</div><div>BASKET TOTAL (ACTIVE ${cCount})</div><div style="font-size:11px;color:#848e9c;margin-top:6px;">AVG P&L (ACTIVE): $${cAvgPnl.toFixed(2)}</div><div style="font-size:11px;color:#9aa4b2;margin-top:4px;">ALL MODELS (${cAllCount}): $${cAll.toFixed(2)} | AVG: $${cAllAvgPnl.toFixed(2)}</div></div>`;
+                cH+=`<div class="summary"><div style="font-size:24px;color:#02c076">$${cAll.toFixed(2)}</div><div>BASKET TOTAL (ALL ${cAllCount})</div><div style="font-size:11px;color:#848e9c;margin-top:6px;">AVG P&L (ALL): $${cAllAvgPnl.toFixed(2)}</div><div style="font-size:11px;color:#9aa4b2;margin-top:4px;">ACTIVE (${cCount}): $${cS.toFixed(2)} | AVG: $${cAvgPnl.toFixed(2)}</div></div>`;
                 document.getElementById('ca').innerHTML=cH;
                 document.getElementById('logs').innerText = d.logs.join(" | ");
             } catch(e) {}
