@@ -40,19 +40,82 @@ BASKET_DATA = {
     name: {"bal": 100.0, "pos": {s: 0.0 for s in SYMBOLS}, "color": d["color"], "provider": d["provider"], "model": d["model"], "temperature": d.get("temperature", 0.35), "busy": False}
     for name, d in ARENA_DATA.items()
 }
-ACTIVE_MODELS = list(ARENA_DATA.keys())
+ACTIVE_ARENA_MODELS = []
+ACTIVE_BASKET_MODELS = []
 ARENA_ORDER = list(ARENA_DATA.keys())
 BASKET_ORDER = list(BASKET_DATA.keys())
 ARENA_IDX = 0
 BASKET_IDX = 0
 
-def set_active_models(names):
-    global ACTIVE_MODELS
+def set_active_models(names, system):
+    global ACTIVE_ARENA_MODELS, ACTIVE_BASKET_MODELS
     allowed = set(ARENA_DATA.keys())
-    ACTIVE_MODELS = [n for n in names if n in allowed]
+    selected = [n for n in names if n in allowed]
+    if system == "arena":
+        ACTIVE_ARENA_MODELS = selected
+        for n in ARENA_DATA:
+            if n not in ACTIVE_ARENA_MODELS:
+                ARENA_DATA[n]["busy"] = False
+    elif system == "basket":
+        ACTIVE_BASKET_MODELS = selected
+        for n in BASKET_DATA:
+            if n not in ACTIVE_BASKET_MODELS:
+                BASKET_DATA[n]["busy"] = False
+
+def toggle_active_model(name, system):
+    if system == "arena":
+        if name in ACTIVE_ARENA_MODELS:
+            set_active_models([n for n in ACTIVE_ARENA_MODELS if n != name], "arena")
+        else:
+            set_active_models(ACTIVE_ARENA_MODELS + [name], "arena")
+    elif system == "basket":
+        if name in ACTIVE_BASKET_MODELS:
+            set_active_models([n for n in ACTIVE_BASKET_MODELS if n != name], "basket")
+        else:
+            set_active_models(ACTIVE_BASKET_MODELS + [name], "basket")
+
+def set_all_models(system, active):
+    if active:
+        set_active_models(list(ARENA_DATA.keys()), system)
+    else:
+        set_active_models([], system)
+
+def sync_model_selections(payload):
+    if "arena_models" in payload:
+        names = payload.get("arena_models", [])
+        if not isinstance(names, list):
+            raise ValueError("arena_models must be a list")
+        set_active_models(names, "arena")
+
+    if "basket_models" in payload:
+        names = payload.get("basket_models", [])
+        if not isinstance(names, list):
+            raise ValueError("basket_models must be a list")
+        set_active_models(names, "basket")
+
+    if "toggle" in payload:
+        t = payload.get("toggle") or {}
+        name = t.get("model")
+        system = t.get("system")
+        if name not in ARENA_DATA:
+            raise ValueError("unknown model")
+        if system not in ("arena", "basket"):
+            raise ValueError("system must be arena or basket")
+        toggle_active_model(name, system)
+
+    if "set_all" in payload:
+        s = payload.get("set_all") or {}
+        system = s.get("system")
+        active = bool(s.get("active"))
+        if system not in ("arena", "basket"):
+            raise ValueError("system must be arena or basket")
+        set_all_models(system, active)
+
     for n in ARENA_DATA:
-        if n not in ACTIVE_MODELS:
+        if n not in ACTIVE_ARENA_MODELS:
             ARENA_DATA[n]["busy"] = False
+    for n in BASKET_DATA:
+        if n not in ACTIVE_BASKET_MODELS:
             BASKET_DATA[n]["busy"] = False
 
 def extract_decision(text):
@@ -272,7 +335,7 @@ def arena_loop():
         if ARENA_ORDER:
             name = ARENA_ORDER[ARENA_IDX % len(ARENA_ORDER)]
             ARENA_IDX += 1
-            if name in ACTIVE_MODELS and not ARENA_DATA[name]["busy"]:
+            if name in ACTIVE_ARENA_MODELS and not ARENA_DATA[name]["busy"]:
                 ARENA_DATA[name]["busy"] = True
                 run_bot_cycle(name)
         if len(LOGS) > 120: LOGS.pop(0)
@@ -338,7 +401,7 @@ def basket_loop():
         if BASKET_ORDER:
             name = BASKET_ORDER[BASKET_IDX % len(BASKET_ORDER)]
             BASKET_IDX += 1
-            if name in ACTIVE_MODELS and not BASKET_DATA[name]["busy"]:
+            if name in ACTIVE_BASKET_MODELS and not BASKET_DATA[name]["busy"]:
                 BASKET_DATA[name]["busy"] = True
                 call_basket_model(name)
         time.sleep(ARENA_CYCLE_SECONDS)
@@ -356,14 +419,15 @@ class H(http.server.SimpleHTTPRequestHandler):
             raw = self.rfile.read(length).decode() if length > 0 else '{}'
             try:
                 payload = json.loads(raw)
-                names = payload.get('active_models', [])
-                if not isinstance(names, list):
-                    raise ValueError('active_models must be a list')
-                set_active_models(names)
+                sync_model_selections(payload)
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
                 self.end_headers()
-                self.wfile.write(json.dumps({"ok": True, "active_models": ACTIVE_MODELS}).encode())
+                self.wfile.write(json.dumps({
+                    "ok": True,
+                    "active_arena_models": ACTIVE_ARENA_MODELS,
+                    "active_basket_models": ACTIVE_BASKET_MODELS
+                }).encode())
             except Exception as e:
                 self.send_response(400)
                 self.send_header('Content-type', 'application/json')
@@ -378,7 +442,7 @@ class H(http.server.SimpleHTTPRequestHandler):
             for b in ARENA_DATA.values(): b["total"] = b["bal"] + (b["pos"] * LIVE_PRICES["BTC"])
             for b in BASKET_DATA.values(): b["total"] = b["bal"] + sum(b["pos"][s] * LIVE_PRICES[s] for s in SYMBOLS)
             self.send_response(200); self.send_header('Content-type','application/json'); self.end_headers()
-            self.wfile.write(json.dumps({"prices":LIVE_PRICES, "bots":ARENA_DATA, "basket_bots":BASKET_DATA, "active_models":ACTIVE_MODELS, "model_names":list(ARENA_DATA.keys()), "logs":LOGS}).encode())
+            self.wfile.write(json.dumps({"prices":LIVE_PRICES, "bots":ARENA_DATA, "basket_bots":BASKET_DATA, "active_arena_models":ACTIVE_ARENA_MODELS, "active_basket_models":ACTIVE_BASKET_MODELS, "model_names":list(ARENA_DATA.keys()), "logs":LOGS}).encode())
         else:
             self.send_response(200); self.send_header('Content-type','text/html'); self.end_headers()
             self.wfile.write(HTML.encode())
@@ -400,10 +464,8 @@ HTML = """
     .summary { background:#1e2329; border-radius:10px; padding:15px; border:2px solid #02c076; width:220px; }
 </style></head><body>
     <aside class="sidebar">
-        <div style="font-size:12px; font-weight:700; margin:14px 0 8px; color:#02c076;">Active Models</div>
-        <div id="modelToggles" class="side-note"></div>
-        <button class="btn" style="margin-top:10px; background:#02c076;" onclick="saveActiveModels()">Apply Model Selection</button>
         <div style="font-size:13px; font-weight:700; margin:14px 0 10px; color:#f0b90b;">CONTROLS</div>
+        <div class="side-note">Click any model card to move it between paused (top) and selected (active).</div>
         <button class="btn" onclick="resetArena()">Reset To $100</button>
         <div id="resetStatus" class="side-note"></div>
     </aside>
@@ -416,22 +478,12 @@ HTML = """
         <div id="logs" style="font-size:10px; color:#848e9c; margin-top:10px;"></div>
     </main>
     <script>
-        function renderModelToggles(d) {
-            const host = document.getElementById('modelToggles');
-            const active = new Set(d.active_models || []);
-            host.innerHTML = (d.model_names || []).map((n, i) => {
-                const checked = active.has(n) ? 'checked' : '';
-                return `<label style="display:block; margin:5px 0;"><input type="checkbox" value="${n}" ${checked} id="m_${i}"> ${n}</label>`;
-            }).join('');
-        }
-
-        async function saveActiveModels() {
+        async function postActiveModels(payload) {
             try {
-                const selected = Array.from(document.querySelectorAll('#modelToggles input[type="checkbox"]:checked')).map(x => x.value);
                 const r = await fetch('/active-models', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({active_models: selected})
+                    body: JSON.stringify(payload)
                 });
                 const d = await r.json();
                 document.getElementById('resetStatus').innerText = d.ok ? 'Model selection updated' : 'Update failed';
@@ -439,6 +491,14 @@ HTML = """
             } catch(e) {
                 document.getElementById('resetStatus').innerText = 'Update failed';
             }
+        }
+
+        async function toggleModel(system, model) {
+            await postActiveModels({toggle: {system, model}});
+        }
+
+        async function setAllModels(system, active) {
+            await postActiveModels({set_all: {system, active}});
         }
 
         async function resetArena() {
@@ -458,41 +518,70 @@ HTML = """
         async function update() {
             try {
                 const r = await fetch('/data'); const d = await r.json();
-                renderModelToggles(d);
-                let bH="", bS=0;
-                let bPnl=0;
+                let bActiveH="", bPausedH="", bS=0;
+                let bPnl=0, bCount=0;
                 Object.entries(d.bots).forEach(([n,b])=>{
-                    const active = (d.active_models || []).includes(n);
+                    const active = (d.active_arena_models || []).includes(n);
                     const state = active ? 'ACTIVE' : 'PAUSED';
-                    bH+=`<div class="card" style="border-color:${b.color}">
+                    const pnl = (b.total - 100);
+                    const card = `<div class="card" style="border-color:${b.color}; cursor:pointer;${active ? '' : ' width:150px; padding:9px; opacity:0.92;'}" onclick="toggleModel('arena','${n.replace(/'/g, "&#39;")}')">
                         <div style="font-size:9px;opacity:0.5">${b.provider}</div>
                         <div style="color:${b.color};font-weight:bold">${n}</div>
                         <div style="font-size:9px;color:${active ? '#02c076' : '#848e9c'}">${state}</div>
                         <div class="total">$${b.total.toFixed(2)}</div>
+                        <div style="font-size:10px;color:${pnl >= 0 ? '#02c076' : '#f6465d'}">P&L: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</div>
                     </div>`;
-                    bS+=b.total;
-                    bPnl += (b.total - 100);
+                    if (active) {
+                        bActiveH += card;
+                        bS += b.total;
+                        bPnl += (b.total - 100);
+                        bCount += 1;
+                    } else {
+                        bPausedH += card;
+                    }
                 });
-                const bAvgPnl = Object.keys(d.bots || {}).length ? (bPnl / Object.keys(d.bots).length) : 0;
-                bH+=`<div class="summary"><div style="font-size:24px;color:#02c076">$${bS.toFixed(2)}</div><div>ARENA TOTAL</div><div style="font-size:11px;color:#848e9c;margin-top:6px;">AVG P&L: $${bAvgPnl.toFixed(2)}</div></div>`;
+                const bAvgPnl = bCount ? (bPnl / bCount) : 0;
+                let bH = "";
+                if (bPausedH) {
+                    bH += `<div style="width:100%; font-size:11px; color:#848e9c; text-align:left; max-width:1100px; margin:0 auto 6px;">PAUSED (TOP ROW, NOT IN TOTAL)</div>`;
+                    bH += bPausedH;
+                    bH += `<div style="width:100%; height:8px;"></div>`;
+                }
+                bH += bActiveH;
+                bH+=`<div class="summary"><div style="font-size:24px;color:#02c076">$${bS.toFixed(2)}</div><div>ARENA TOTAL (ACTIVE)</div><div style="font-size:11px;color:#848e9c;margin-top:6px;">AVG P&L: $${bAvgPnl.toFixed(2)}</div></div>`;
                 document.getElementById('ba').innerHTML=bH;
 
-                let cH="", cS=0;
-                let cPnl=0;
+                let cActiveH="", cPausedH="", cS=0;
+                let cPnl=0, cCount=0;
                 Object.entries(d.basket_bots).forEach(([n,b])=>{
-                    const active = (d.active_models || []).includes(n);
+                    const active = (d.active_basket_models || []).includes(n);
                     const state = active ? 'ACTIVE' : 'PAUSED';
-                    cH+=`<div class="card" style="border-color:${b.color}">
+                    const pnl = (b.total - 100);
+                    const card = `<div class="card" style="border-color:${b.color}; cursor:pointer;${active ? '' : ' width:150px; padding:9px; opacity:0.92;'}" onclick="toggleModel('basket','${n.replace(/'/g, "&#39;")}')">
                         <div style="font-size:9px;opacity:0.5">${b.provider}</div>
                         <div style="color:${b.color};font-weight:bold">${n}</div>
                         <div style="font-size:9px;color:${active ? '#02c076' : '#848e9c'}">${state}</div>
                         <div class="total">$${b.total.toFixed(2)}</div>
+                        <div style="font-size:10px;color:${pnl >= 0 ? '#02c076' : '#f6465d'}">P&L: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</div>
                     </div>`;
-                    cS+=b.total;
-                    cPnl += (b.total - 100);
+                    if (active) {
+                        cActiveH += card;
+                        cS += b.total;
+                        cPnl += (b.total - 100);
+                        cCount += 1;
+                    } else {
+                        cPausedH += card;
+                    }
                 });
-                const cAvgPnl = Object.keys(d.basket_bots || {}).length ? (cPnl / Object.keys(d.basket_bots).length) : 0;
-                cH+=`<div class="summary"><div style="font-size:24px;color:#02c076">$${cS.toFixed(2)}</div><div>BASKET TOTAL</div><div style="font-size:11px;color:#848e9c;margin-top:6px;">AVG P&L: $${cAvgPnl.toFixed(2)}</div></div>`;
+                const cAvgPnl = cCount ? (cPnl / cCount) : 0;
+                let cH = "";
+                if (cPausedH) {
+                    cH += `<div style="width:100%; font-size:11px; color:#848e9c; text-align:left; max-width:1100px; margin:0 auto 6px;">PAUSED (TOP ROW, NOT IN TOTAL)</div>`;
+                    cH += cPausedH;
+                    cH += `<div style="width:100%; height:8px;"></div>`;
+                }
+                cH += cActiveH;
+                cH+=`<div class="summary"><div style="font-size:24px;color:#02c076">$${cS.toFixed(2)}</div><div>BASKET TOTAL (ACTIVE)</div><div style="font-size:11px;color:#848e9c;margin-top:6px;">AVG P&L: $${cAvgPnl.toFixed(2)}</div></div>`;
                 document.getElementById('ca').innerHTML=cH;
                 document.getElementById('logs').innerText = d.logs.join(" | ");
             } catch(e) {}
