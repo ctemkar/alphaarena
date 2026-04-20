@@ -45,8 +45,8 @@ BASKET_DATA = {
     name: {"bal": 100.0, "pos": {s: 0.0 for s in SYMBOLS}, "color": d["color"], "provider": d["provider"], "model": d["model"], "temperature": d.get("temperature", 0.35), "busy": False, "frozen_total": None}
     for name, d in ARENA_DATA.items()
 }
-ACTIVE_ARENA_MODELS = []
-ACTIVE_BASKET_MODELS = []
+ACTIVE_ARENA_MODELS = list(ARENA_DATA.keys())
+ACTIVE_BASKET_MODELS = list(BASKET_DATA.keys())
 ARENA_ORDER = list(ARENA_DATA.keys())
 BASKET_ORDER = list(BASKET_DATA.keys())
 ARENA_IDX = 0
