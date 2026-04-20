@@ -43,6 +43,14 @@ BINANCE_API_KEY = os.getenv("EXCH_BINANCE_API_KEY", "")
 BINANCE_API_SECRET = os.getenv("EXCH_BINANCE_API_SECRET", "")
 LIVE_TRADING_ENABLED = os.getenv("ALPHA_LIVE_TRADING", "0").strip().lower() in {"1", "true", "yes", "on"}
 ALLOW_SPOT_SHORT = os.getenv("ALPHA_ALLOW_SPOT_SHORT", "0").strip().lower() in {"1", "true", "yes", "on"}
+try:
+    ANALYTICS_FEE_BPS = float(os.getenv("ALPHA_ANALYTICS_FEE_BPS", "10"))
+except ValueError:
+    ANALYTICS_FEE_BPS = 10.0
+try:
+    ANALYTICS_SLIPPAGE_BPS = float(os.getenv("ALPHA_ANALYTICS_SLIPPAGE_BPS", "5"))
+except ValueError:
+    ANALYTICS_SLIPPAGE_BPS = 5.0
 
 try:
     LIVE_ORDER_USD = float(os.getenv("ALPHA_LIVE_ORDER_USD", "50"))
@@ -164,10 +172,137 @@ class ArenaState:
         self.halt_reason = ""
         self.guardrail_day = datetime.utcnow().strftime("%Y-%m-%d")
         self.live_order_queue: queue.Queue[tuple[str, str, str, float]] = queue.Queue()
+        self.summary_path = Path("daily_summary.json")
+        self._summary_cache_stamp: tuple[str, int, int] | None = None
+        self._summary_cache = self._default_daily_summary(datetime.now().strftime("%Y-%m-%d"))
         self.logs = []
         self.recalc_basket()
         if self.live_trading:
             threading.Thread(target=self._live_order_worker, daemon=True).start()
+
+    @staticmethod
+    def _default_daily_summary(day: str) -> dict:
+        return {
+            "day": day,
+            "samples": 0,
+            "signals": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate_pct": 0.0,
+            "expectancy_usd": 0.0,
+            "max_drawdown_usd": 0.0,
+            "total_pnl_usd": 0.0,
+            "best_model": "-",
+            "best_model_pnl_usd": 0.0,
+            "worst_model": "-",
+            "worst_model_pnl_usd": 0.0,
+            "fee_bps": ANALYTICS_FEE_BPS,
+            "slippage_bps": ANALYTICS_SLIPPAGE_BPS,
+        }
+
+    def _get_daily_summary(self) -> dict:
+        day = datetime.now().strftime("%Y-%m-%d")
+        log_path = Path(MOVEMENT_LOG_FILE)
+        if not log_path.exists():
+            self._summary_cache_stamp = None
+            self._summary_cache = self._default_daily_summary(day)
+            return self._summary_cache
+
+        stat = log_path.stat()
+        stamp = (day, stat.st_mtime_ns, stat.st_size)
+        if self._summary_cache_stamp == stamp:
+            return self._summary_cache
+
+        summary = self._default_daily_summary(day)
+        model_pnl: dict[str, float] = {}
+        pnl_deltas: list[float] = []
+        wins = 0
+        losses = 0
+        signals = 0
+        samples = 0
+
+        for raw in log_path.read_text(encoding="utf-8").splitlines():
+            if not raw.strip():
+                continue
+            try:
+                rec = json.loads(raw)
+            except Exception:
+                continue
+
+            ts = str(rec.get("ts", ""))
+            if not ts.startswith(day):
+                continue
+
+            rtype = rec.get("type")
+            if rtype == "price":
+                samples += 1
+                continue
+
+            if rtype == "signal" and rec.get("signal") in {"LONG", "SHORT"}:
+                signals += 1
+                continue
+
+            if rtype == "pnl":
+                try:
+                    delta = float(rec.get("pnl_delta", 0.0))
+                except (TypeError, ValueError):
+                    continue
+                pnl_deltas.append(delta)
+                if delta > 0:
+                    wins += 1
+                elif delta < 0:
+                    losses += 1
+                model = str(rec.get("model", ""))
+                if model:
+                    model_pnl[model] = model_pnl.get(model, 0.0) + delta
+
+        total_pnl = sum(pnl_deltas)
+        trades = wins + losses
+        expectancy = (total_pnl / trades) if trades else 0.0
+        win_rate = (wins / trades * 100.0) if trades else 0.0
+
+        # Drawdown on cumulative realized P&L trajectory.
+        equity = 0.0
+        peak = 0.0
+        max_dd = 0.0
+        for d in pnl_deltas:
+            equity += d
+            if equity > peak:
+                peak = equity
+            dd = peak - equity
+            if dd > max_dd:
+                max_dd = dd
+
+        best_model = "-"
+        worst_model = "-"
+        best_pnl = 0.0
+        worst_pnl = 0.0
+        if model_pnl:
+            best_model, best_pnl = max(model_pnl.items(), key=lambda kv: kv[1])
+            worst_model, worst_pnl = min(model_pnl.items(), key=lambda kv: kv[1])
+
+        summary.update({
+            "samples": samples,
+            "signals": signals,
+            "wins": wins,
+            "losses": losses,
+            "win_rate_pct": round(win_rate, 2),
+            "expectancy_usd": round(expectancy, 4),
+            "max_drawdown_usd": round(max_dd, 4),
+            "total_pnl_usd": round(total_pnl, 4),
+            "best_model": best_model,
+            "best_model_pnl_usd": round(best_pnl, 4),
+            "worst_model": worst_model,
+            "worst_model_pnl_usd": round(worst_pnl, 4),
+        })
+
+        self._summary_cache_stamp = stamp
+        self._summary_cache = summary
+        try:
+            self.summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+        return summary
 
     def _desk_symbols(self, desk: str) -> list[str]:
         if desk == "basket":
@@ -492,6 +627,7 @@ class ArenaState:
                 },
                 "models": self.models,
                 "start_balance": START_BALANCE,
+                "daily_summary": self._get_daily_summary(),
                 "logs": self.logs[:],
                 "ts": now_ts(),
             }

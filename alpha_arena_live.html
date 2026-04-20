@@ -16,6 +16,7 @@
         .card { background: #181a20; padding: 18px; border-radius: 8px; border: 1px solid #2b2f36; }
         .card h4 { margin: 0; color: #848e9c; font-size: 22px; text-transform: uppercase; letter-spacing: 0.5px; }
         .card .val { font-size: 40px; margin-top: 8px; font-weight: bold; }
+        .card .sub { margin-top: 8px; font-size: 16px; line-height: 1.35; color: #b7bdc6; }
 
         .chip-wrap { display: flex; flex-wrap: wrap; gap: 10px; }
         .chip {
@@ -86,6 +87,7 @@
         <div class="card"><h4>Total PnL</h4><div id="pnl-val" class="val" style="color:#02c076">+$0.00</div></div>
         <div class="card"><h4>Selected Models</h4><div id="active-models" class="val">0</div></div>
         <div class="card"><h4>Mode</h4><div id="mode-val" class="val" style="color:#f0b90b;font-size:36px">PAPER</div></div>
+        <div class="card"><h4>Daily Analytics</h4><div id="daily-summary" class="sub">Loading...</div></div>
     </div>
 
     <div class="desks-stack">
@@ -151,6 +153,7 @@
         const activeModelsEl  = document.getElementById('active-models');
         const modeEl          = document.getElementById('mode-val');
         const pnlEl           = document.getElementById('pnl-val');
+        const dailySummaryEl  = document.getElementById('daily-summary');
         const feedLbl         = document.getElementById('feed-label');
         const feedBadge       = document.getElementById('feed-badge');
         const availBtcEl      = document.getElementById('available-btc');
@@ -219,6 +222,25 @@
             if (!el) return;
             el.innerText = formatPnl(value);
             el.style.color = value > 0 ? '#02c076' : value < 0 ? '#f84960' : '#848e9c';
+        }
+
+        function renderDailySummary(summary) {
+            if (!dailySummaryEl) return;
+            if (!summary) {
+                dailySummaryEl.innerText = 'No data yet';
+                return;
+            }
+            const win = Number(summary.win_rate_pct || 0).toFixed(1) + '%';
+            const exp = formatPnl(Number(summary.expectancy_usd || 0));
+            const mdd = formatPnl(-Math.abs(Number(summary.max_drawdown_usd || 0)));
+            const best = (summary.best_model || '-') + ' (' + formatPnl(Number(summary.best_model_pnl_usd || 0)) + ')';
+            const worst = (summary.worst_model || '-') + ' (' + formatPnl(Number(summary.worst_model_pnl_usd || 0)) + ')';
+            const signals = Number(summary.signals || 0);
+            const samples = Number(summary.samples || 0);
+            dailySummaryEl.innerHTML =
+                'Win rate: <strong>' + win + '</strong> | Expectancy: <strong>' + exp + '</strong> | Max DD: <strong>' + mdd + '</strong><br>' +
+                'Best: <strong>' + best + '</strong> | Worst: <strong>' + worst + '</strong><br>' +
+                'Signals: <strong>' + signals + '</strong> | Samples: <strong>' + samples + '</strong>';
         }
 
         function chipHtml(name, m, pnl, ollamaModels, opts = {}) {
@@ -312,6 +334,7 @@
 
             const totalPnl = btcPnl + basketPnl;
             applyPnlText(pnlEl, totalPnl);
+            renderDailySummary(s.daily_summary || null);
 
             // Logs — filter by desk
             const btcLogs    = s.logs.filter(l => l.includes('[BTC]')    || !l.includes('[BASKET]'));
