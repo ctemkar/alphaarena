@@ -17,7 +17,16 @@ OLLAMA_URL = "http://127.0.0.1:11434"
 
 # Map model name  (as it appears in ARENA_DATA) -> Ollama model tag
 OLLAMA_MODELS: dict[str, str] = {
-    "finance-llama-8b": "martain7r/finance-llama-8b:fp16",
+    "Qwen-3":          "qwen3.5:latest",
+    "Qwen-2.5-Coder":  "qwen2.5-coder:7b",
+    "Qwen3-Coder":     "qwen3-coder:latest",
+    "DeepSeek-R1":     "deepseek-r1:8b",
+    "Gemma-4":         "gemma4:latest",
+    "Phi-3":           "phi3:latest",
+    "Llama-4":         "llama3:latest",
+    "Llama-3.2":       "llama3.2:3b",
+    "Mistral":         "mistral:latest",
+    "finance-llama-8b":"martain7r/finance-llama-8b:fp16",
 }
 
 
@@ -57,13 +66,16 @@ class ArenaState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.models = {
-            "Qwen-3": self._mk_model("#02c076", 0.56),
-            "DeepSeek": self._mk_model("#00ccff", 0.52),
-            "Claude-4": self._mk_model("#f84960", 0.48),
-            "GPT-5": self._mk_model("#f0b90b", 0.45),
-            "Llama-4": self._mk_model("#ff7d4d", 0.50),
-            "Mistral": self._mk_model("#d58bff", 0.51),
-            "finance-llama-8b": self._mk_model("#a7f432", 0.54),
+            "Qwen-3":          self._mk_model("#02c076", 0.56),
+            "Qwen-2.5-Coder":  self._mk_model("#00e5cc", 0.53),
+            "Qwen3-Coder":     self._mk_model("#00bfa5", 0.55),
+            "DeepSeek-R1":     self._mk_model("#00ccff", 0.52),
+            "Gemma-4":         self._mk_model("#f84960", 0.48),
+            "Phi-3":           self._mk_model("#f0b90b", 0.45),
+            "Llama-4":         self._mk_model("#ff7d4d", 0.50),
+            "Llama-3.2":       self._mk_model("#ffaa44", 0.49),
+            "Mistral":         self._mk_model("#d58bff", 0.51),
+            "finance-llama-8b":self._mk_model("#a7f432", 0.54),
         }
         self.prices = {
             "btc": 84_000.0,

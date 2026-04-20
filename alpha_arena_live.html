@@ -5,28 +5,66 @@
     <title>Alpha Arena | Paper Trading</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        body { font-family: 'Inter', sans-serif; background: #0b0e11; color: #eaecef; margin: 0; padding: 20px; box-sizing: border-box; font-size: 16px; }
-        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; border-bottom: 1px solid #2b2f36; padding-bottom: 12px; }
-        .live-indicator { color: #02c076; font-weight: bold; display: flex; align-items: center; }
-        .dot { height: 8px; width: 8px; background: #02c076; border-radius: 50%; margin-right: 8px; animation: blink 1s infinite; }
+        body { font-family: 'Inter', sans-serif; background: #0b0e11; color: #eaecef; margin: 0; padding: 28px; box-sizing: border-box; font-size: 32px; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #2b2f36; padding-bottom: 16px; }
+        .header h2 { font-size: 42px; }
+        .live-indicator { color: #02c076; font-weight: bold; display: flex; align-items: center; font-size: 28px; }
+        .dot { height: 14px; width: 14px; background: #02c076; border-radius: 50%; margin-right: 10px; animation: blink 1s infinite; }
         @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }
 
-        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 12px; }
-        .card { background: #181a20; padding: 14px; border-radius: 8px; border: 1px solid #2b2f36; }
-        .card h4 { margin: 0; color: #848e9c; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; }
-        .card .val { font-size: 24px; margin-top: 6px; font-weight: bold; }
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; margin-bottom: 20px; }
+        .card { background: #181a20; padding: 18px; border-radius: 8px; border: 1px solid #2b2f36; }
+        .card h4 { margin: 0; color: #848e9c; font-size: 26px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .card .val { font-size: 48px; margin-top: 8px; font-weight: bold; }
 
-        .selector-panel { background: #181a20; border: 1px solid #2b2f36; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
-        .selector-panel h3 { margin: 0 0 10px 0; font-size: 16px; color: #eaecef; }
-        .help { color: #848e9c; font-size: 14px; margin-bottom: 8px; }
-        .chip-wrap { display: flex; flex-wrap: wrap; gap: 8px; }
+        .chip-wrap { display: flex; flex-wrap: wrap; gap: 10px; }
+        .chip {
+            border: 1px solid #2b2f36;
+            border-radius: 999px;
+            background: #10151b;
+            color: #eaecef;
+            padding: 10px 18px;
+            font-size: 28px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .chip:hover { border-color: #f0b90b; }
+        .chip.selected-chip { border-color: #2b6cb0; background: #0d1b2e; }
+        .chip.selected-chip:hover { border-color: #f84960; }
+        .chip-name { font-weight: 600; }
+        .chip-pnl-pos { color: #02c076; }
+        .chip-pnl-neg { color: #f84960; }
+        .chip-pnl-flat { color: #848e9c; }
+        .badge-ai { font-size: 20px; background: #a7f432; color: #0b0e11; border-radius: 4px; padding: 2px 8px; margin-left: 6px; font-weight: 700; vertical-align: middle; }
+        .sig-long  { font-size: 20px; color: #02c076; background: rgba(2,192,118,.15); border-radius: 4px; padding: 2px 8px; margin-left: 6px; font-weight: 700; }
+        .sig-short { font-size: 20px; color: #f84960; background: rgba(248,73,96,.15);  border-radius: 4px; padding: 2px 8px; margin-left: 6px; font-weight: 700; }
+        .sig-hold  { font-size: 20px; color: #f0b90b; background: rgba(240,185,11,.15); border-radius: 4px; padding: 2px 8px; margin-left: 6px; font-weight: 700; }
 
-        .badge { font-size: 12px; padding: 3px 9px; border-radius: 12px; margin-left: 8px; }
+        .badge { font-size: 24px; padding: 4px 14px; border-radius: 12px; margin-left: 10px; }
         .badge-live { background: #02c07622; color: #02c076; }
-        .badge-sim { background: #f0b90b22; color: #f0b90b; }
+        .badge-sim  { background: #f0b90b22; color: #f0b90b; }
+
+        /* Two fully independent desk sections — stacked vertically */
+        .desks-stack { display: flex; flex-direction: column; gap: 24px; }
+        .desk-section { background: #181a20; border: 1px solid #2b2f36; border-radius: 10px; padding: 24px; }
+        .desk-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+        .desk-header h2 { margin: 0; font-size: 32px; }
+        .desk-price { font-size: 22px; color: #848e9c; }
+        .desk-pnl-badge { font-size: 26px; font-weight: 700; }
+        /* chips left, chart right */
+        .desk-body { display: grid; grid-template-columns: 1fr 440px; gap: 20px; align-items: start; }
+        .desk-left { display: flex; flex-direction: column; gap: 12px; }
+        .section-label { font-size: 18px; text-transform: uppercase; letter-spacing: 0.6px; color: #848e9c; margin-bottom: 4px; }
+        .divider { border: none; border-top: 1px solid #2b2f36; margin: 6px 0; }
+        .chart-box { height: 260px; position: relative; }
+        .empty { color: #848e9c; font-size: 22px; padding: 4px 0; }
+        .trade-log { max-height: 150px; overflow-y: auto; font-size: 20px; color: #848e9c; border-top: 1px solid #2b2f36; padding-top: 8px; margin-top: 6px; }
+        .trade-log div { padding: 3px 0; }
 
         @media (max-width: 980px) {
-            .desks-grid { grid-template-columns: 1fr; }
+            .desk-body { grid-template-columns: 1fr; }
         }
     </style>
 </head>
@@ -44,224 +82,213 @@
         <div class="card"><h4>Live BTC Price</h4><div id="btc-price" class="val">--</div></div>
         <div class="card"><h4>Best Desk PnL</h4><div id="pnl-val" class="val" style="color:#02c076">+$0.00</div></div>
         <div class="card"><h4>Selected Models</h4><div id="active-models" class="val">0</div></div>
-        <div class="card"><h4>Mode</h4><div id="mode-val" class="val" style="color:#f0b90b;font-size:18px">PAPER</div></div>
+        <div class="card"><h4>Mode</h4><div id="mode-val" class="val" style="color:#f0b90b;font-size:36px">PAPER</div></div>
     </div>
 
-    <div class="desks-grid">
+    <div class="desks-stack">
 
         <!-- BTC-Only Desk -->
         <div class="desk-section">
             <div class="desk-header">
-                <h2 style="margin:0;color:#f0b90b">₿ BTC-Only Desk</h2>
+                <h2 style="color:#f0b90b">&#x20BF; BTC-Only Desk</h2>
                 <div style="text-align:right">
-                    <div id="btc-price" class="desk-price">--</div>
+                    <div id="btc-price-desk" class="desk-price">--</div>
                     <div id="btc-desk-pnl" class="desk-pnl-badge" style="color:#02c076">+$0.00</div>
                 </div>
             </div>
-            <div class="section-label">Available Models — click to add to this desk</div>
-            <div id="available-btc" class="chip-wrap"></div>
-            <hr class="divider">
-            <div class="section-label">Active on Desk — click to remove</div>
-            <div id="selected-btc" class="chip-wrap"></div>
-            <div id="empty-btc" class="empty">No models on this desk</div>
-            <div class="chart-box"><canvas id="btcChart"></canvas></div>
-            <div class="trade-log" id="log-btc"></div>
+            <div class="desk-body">
+                <div class="desk-left">
+                    <div class="section-label">Available — click to add</div>
+                    <div id="available-btc" class="chip-wrap"></div>
+                    <hr class="divider">
+                    <div class="section-label">Active on desk — click to remove</div>
+                    <div id="selected-btc" class="chip-wrap"></div>
+                    <div id="empty-btc" class="empty" style="display:none">No models on this desk</div>
+                </div>
+                <div>
+                    <div class="chart-box"><canvas id="btcChart"></canvas></div>
+                    <div class="trade-log" id="log-btc"></div>
+                </div>
+            </div>
         </div>
 
         <!-- Basket Desk -->
         <div class="desk-section">
             <div class="desk-header">
-                <h2 style="margin:0;color:#00ccff">⬡ Basket Desk</h2>
+                <h2 style="color:#00ccff">&#x2B21; Basket Desk</h2>
                 <div style="text-align:right">
-                    <div id="basket-price" class="desk-price">--</div>
+                    <div id="basket-price-desk" class="desk-price">--</div>
                     <div id="basket-desk-pnl" class="desk-pnl-badge" style="color:#02c076">+$0.00</div>
                 </div>
             </div>
-            <div class="section-label">Available Models — click to add to this desk</div>
-            <div id="available-basket" class="chip-wrap"></div>
-            <hr class="divider">
-            <div class="section-label">Active on Desk — click to remove</div>
-            <div id="selected-basket" class="chip-wrap"></div>
-            <div id="empty-basket" class="empty">No models on this desk</div>
-            <div class="chart-box"><canvas id="basketChart"></canvas></div>
-            <div class="trade-log" id="log-basket"></div>
+            <div class="desk-body">
+                <div class="desk-left">
+                    <div class="section-label">Available — click to add</div>
+                    <div id="available-basket" class="chip-wrap"></div>
+                    <hr class="divider">
+                    <div class="section-label">Active on desk — click to remove</div>
+                    <div id="selected-basket" class="chip-wrap"></div>
+                    <div id="empty-basket" class="empty" style="display:none">No models on this desk</div>
+                </div>
+                <div>
+                    <div class="chart-box"><canvas id="basketChart"></canvas></div>
+                    <div class="trade-log" id="log-basket"></div>
+                </div>
+            </div>
         </div>
 
     </div>
 
     <script>
-        const btcPriceEl   = document.getElementById('btc-price');
-        const btcDeskPnlEl = document.getElementById('btc-desk-pnl');
-        const basketPriceEl   = document.getElementById('basket-price');
+        const btcPriceEl      = document.getElementById('btc-price');       // stats bar
+        const btcPriceDeskEl  = document.getElementById('btc-price-desk');  // desk header
+        const btcDeskPnlEl    = document.getElementById('btc-desk-pnl');
+        const basketPriceDeskEl = document.getElementById('basket-price-desk');
         const basketDeskPnlEl = document.getElementById('basket-desk-pnl');
-        const activeModelsEl = document.getElementById('active-models');
-        const modeEl    = document.getElementById('mode-val');
-        const pnlEl     = document.getElementById('pnl-val');
-        const feedLbl   = document.getElementById('feed-label');
-        const feedBadge = document.getElementById('feed-badge');
-        const availBtcEl    = document.getElementById('available-btc');
-        const availBasketEl = document.getElementById('available-basket');
-        const selectedBtcEl    = document.getElementById('selected-btc');
-        const selectedBasketEl = document.getElementById('selected-basket');
-        const emptyBtcEl    = document.getElementById('empty-btc');
-        const emptyBasketEl = document.getElementById('empty-basket');
-        const logBtcEl    = document.getElementById('log-btc');
-        const logBasketEl = document.getElementById('log-basket');
+        const activeModelsEl  = document.getElementById('active-models');
+        const modeEl          = document.getElementById('mode-val');
+        const pnlEl           = document.getElementById('pnl-val');
+        const feedLbl         = document.getElementById('feed-label');
+        const feedBadge       = document.getElementById('feed-badge');
+        const availBtcEl      = document.getElementById('available-btc');
+        const availBasketEl   = document.getElementById('available-basket');
+        const selectedBtcEl   = document.getElementById('selected-btc');
+        const selectedBasketEl= document.getElementById('selected-basket');
+        const emptyBtcEl      = document.getElementById('empty-btc');
+        const emptyBasketEl   = document.getElementById('empty-basket');
+        const logBtcEl        = document.getElementById('log-btc');
+        const logBasketEl     = document.getElementById('log-basket');
 
         let state = null;
 
         function makeDeskChart(canvasId, label, color) {
             return new Chart(document.getElementById(canvasId).getContext('2d'), {
                 type: 'line',
-                data: {
-                    labels: [],
-                    datasets: [
-                        { label, borderColor: color, backgroundColor: 'transparent', data: [], tension: 0.2, pointRadius: 0, borderWidth: 2 }
-                    ]
-                },
+                data: { labels: [], datasets: [{ label, borderColor: color, backgroundColor: 'transparent', data: [], tension: 0.2, pointRadius: 0, borderWidth: 2 }] },
                 options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    animation: false,
+                    responsive: true, maintainAspectRatio: false, animation: false,
                     plugins: { legend: { display: false } },
                     scales: {
                         x: { display: false },
-                        y: {
-                            grid: { color: '#2b2f36' },
-                            ticks: { color: '#848e9c', callback: (v) => '$' + Number(v).toLocaleString() }
-                        }
+                        y: { grid: { color: '#2b2f36' }, ticks: { color: '#848e9c', font: { size: 22 }, callback: (v) => '$' + Number(v).toLocaleString() } }
                     }
                 }
             });
         }
 
-        const btcChart = makeDeskChart('btcChart', 'BTC-Only Desk', '#f0b90b');
-        const basketChart = makeDeskChart('basketChart', 'Basket Desk', '#00ccff');
+        const btcChart    = makeDeskChart('btcChart',    'BTC-Only Desk', '#f0b90b');
+        const basketChart = makeDeskChart('basketChart', 'Basket Desk',   '#00ccff');
 
-        function pushChartPoint(targetChart, ts, value) {
-            targetChart.data.labels.push(ts);
-            targetChart.data.datasets[0].data.push(Number(value.toFixed(2)));
-            if (targetChart.data.labels.length > 60) {
-                targetChart.data.labels.shift();
-                targetChart.data.datasets[0].data.shift();
-            }
-            targetChart.update('none');
+        function pushChartPoint(chart, ts, value) {
+            chart.data.labels.push(ts);
+            chart.data.datasets[0].data.push(Number(value.toFixed(2)));
+            if (chart.data.labels.length > 60) { chart.data.labels.shift(); chart.data.datasets[0].data.shift(); }
+            chart.update('none');
         }
 
-        function pnlClass(v) {
-            if (v > 0) return 'chip-pnl-pos';
-            if (v < 0) return 'chip-pnl-neg';
-            return 'chip-pnl-flat';
-        }
+        function pnlClass(v) { return v > 0 ? 'chip-pnl-pos' : v < 0 ? 'chip-pnl-neg' : 'chip-pnl-flat'; }
+        function formatPnl(v) { const n = Number(v.toFixed(2)); return (n >= 0 ? '+' : '') + '$' + n.toLocaleString(); }
+        function countSelected(models, desk) { return Object.values(models).filter(m => m.selected && m.desk === desk).length; }
 
-        function formatPnl(v) {
-            const n = Number(v.toFixed(2));
-            return (n >= 0 ? '+' : '') + '$' + n.toLocaleString();
-        }
-
-        function countSelected(models, desk) {
-            return Object.values(models).filter((m) => m.selected && m.desk === desk).length;
+        function chipHtml(name, m, pnl, ollamaModels) {
+            const aiBadge  = ollamaModels.includes(name) ? '<span class="badge-ai">AI</span>' : '';
+            const sigClass = m.last_signal === 'LONG' ? 'sig-long' : m.last_signal === 'SHORT' ? 'sig-short' : 'sig-hold';
+            const sigLabel = m.last_signal && m.last_signal !== 'IDLE'
+                ? '<span class="' + sigClass + '">' + m.last_signal + '</span>' : '';
+            return '<button class="chip" data-name="' + name + '">'
+                + '<span class="chip-name" style="color:' + m.color + '">' + name + aiBadge + sigLabel + '</span>'
+                + '<span class="' + pnlClass(pnl) + '">' + formatPnl(pnl) + '</span>'
+                + '</button>';
         }
 
         function renderState(s) {
             state = s;
             const models = s.models;
-            const names = Object.keys(models);
+            const names  = Object.keys(models);
+            const ollama = s.status.ollama_models || [];
 
-            btcEl.innerText = '$' + Number(s.prices.btc).toLocaleString(undefined, { maximumFractionDigits: 2 });
-            modeEl.innerText = s.status.mode;
-
+            // Header feed badge
             if (s.status.feed === 'LIVE') {
                 feedLbl.innerText = 'BINANCE LIVE: BTC/USDT';
-                feedBadge.innerText = 'LIVE';
-                feedBadge.className = 'badge badge-live';
+                feedBadge.innerText = 'LIVE'; feedBadge.className = 'badge badge-live';
             } else {
                 feedLbl.innerText = 'SIMULATION FEED';
-                feedBadge.innerText = 'SIM';
-                feedBadge.className = 'badge badge-sim';
+                feedBadge.innerText = 'SIM'; feedBadge.className = 'badge badge-sim';
             }
 
-            const available = names.filter((name) => !models[name].selected);
-            const btcSelected = names.filter((name) => models[name].selected && models[name].desk === 'btc');
-            const basketSelected = names.filter((name) => models[name].selected && models[name].desk === 'basket');
+            // Top stats bar
+            if (btcPriceEl)       btcPriceEl.innerText       = '$' + Number(s.prices.btc).toLocaleString(undefined, { maximumFractionDigits: 2 });
+            if (btcPriceDeskEl)   btcPriceDeskEl.innerText   = '$' + Number(s.prices.btc).toLocaleString(undefined, { maximumFractionDigits: 2 });
+            if (modeEl)           modeEl.innerText           = s.status.mode;
 
-            availableEl.innerHTML = available.map((name) => {
-                const m = models[name];
-                const aiBadge = (s.status.ollama_models || []).includes(name)
-                    ? '<span class="badge-ai">AI</span>' : '';
-                return '<button class="chip" data-name="' + name + '">'
-                    + '<span class="chip-name" style="color:' + m.color + '">' + name + aiBadge + '</span>'
-                    + '<span class="' + pnlClass(m.preview_pnl) + '">' + formatPnl(m.preview_pnl) + '</span>'
-                    + '</button>';
-            }).join('');
+            // Desk prices & PnL
+            if (btcDeskPnlEl)     btcDeskPnlEl.innerText     = formatPnl(s.desk_equity.btc - countSelected(models, 'btc') * 10000);
+            if (basketPriceDeskEl) basketPriceDeskEl.innerText = '$' + Number(s.prices.basket).toLocaleString(undefined, { maximumFractionDigits: 2 });
+            if (basketDeskPnlEl)  basketDeskPnlEl.innerText  = formatPnl(s.desk_equity.basket - countSelected(models, 'basket') * 10000);
 
-            selectedBtcEl.innerHTML = btcSelected.map((name) => {
-                const m = models[name];
-                const pnl = m.balance - 10000;
-                const aiBadge = (s.status.ollama_models || []).includes(name)
-                    ? '<span class="badge-ai">AI</span>' : '';
-                const sigClass = m.last_signal === 'LONG' ? 'sig-long'
-                    : m.last_signal === 'SHORT' ? 'sig-short' : 'sig-hold';
-                const sigLabel = m.last_signal && m.last_signal !== 'IDLE'
-                    ? '<span class="' + sigClass + '">' + m.last_signal + '</span>' : '';
-                return '<button class="chip" data-name="' + name + '">'
-                    + '<span class="chip-name" style="color:' + m.color + '">' + name + aiBadge + sigLabel + '</span>'
-                    + '<span class="' + pnlClass(pnl) + '">' + formatPnl(pnl) + '</span>'
-                    + '</button>';
-            }).join('');
+            // Split models into groups
+            const unselected     = names.filter(n => !models[n].selected);
+            const btcSelected    = names.filter(n => models[n].selected && models[n].desk === 'btc');
+            const basketSelected = names.filter(n => models[n].selected && models[n].desk === 'basket');
 
-            selectedBasketEl.innerHTML = basketSelected.map((name) => {
-                const m = models[name];
-                const pnl = m.balance - 10000;
-                const aiBadge = (s.status.ollama_models || []).includes(name)
-                    ? '<span class="badge-ai">AI</span>' : '';
-                const sigClass = m.last_signal === 'LONG' ? 'sig-long'
-                    : m.last_signal === 'SHORT' ? 'sig-short' : 'sig-hold';
-                const sigLabel = m.last_signal && m.last_signal !== 'IDLE'
-                    ? '<span class="' + sigClass + '">' + m.last_signal + '</span>' : '';
-                return '<button class="chip" data-name="' + name + '">'
-                    + '<span class="chip-name" style="color:' + m.color + '">' + name + aiBadge + sigLabel + '</span>'
-                    + '<span class="' + pnlClass(pnl) + '">' + formatPnl(pnl) + '</span>'
-                    + '</button>';
-            }).join('');
+            // Available pools — all unselected shown in BOTH desks
+            availBtcEl.innerHTML    = unselected.map(n => chipHtml(n, models[n], models[n].preview_pnl, ollama)).join('');
+            availBasketEl.innerHTML = unselected.map(n => chipHtml(n, models[n], models[n].preview_pnl, ollama)).join('');
 
-            emptyBtcEl.style.display = btcSelected.length ? 'none' : 'block';
+            // Active on each desk
+            selectedBtcEl.innerHTML    = btcSelected.map(n => chipHtml(n, models[n], models[n].balance - 10000, ollama)).join('');
+            selectedBasketEl.innerHTML = basketSelected.map(n => chipHtml(n, models[n], models[n].balance - 10000, ollama)).join('');
+
+            emptyBtcEl.style.display    = btcSelected.length    ? 'none' : 'block';
             emptyBasketEl.style.display = basketSelected.length ? 'none' : 'block';
+
             activeModelsEl.innerText = String(btcSelected.length + basketSelected.length);
 
-            const btcPnl = s.desk_equity.btc - countSelected(models, 'btc') * 10000;
+            const btcPnl    = s.desk_equity.btc    - countSelected(models, 'btc')    * 10000;
             const basketPnl = s.desk_equity.basket - countSelected(models, 'basket') * 10000;
-            const bestPnl = Math.max(btcPnl, basketPnl, 0);
-            pnlEl.innerText = formatPnl(bestPnl);
-            pnlEl.style.color = bestPnl >= 0 ? '#02c076' : '#f84960';
+            const bestPnl   = Math.max(btcPnl, basketPnl, 0);
+            pnlEl.innerText    = formatPnl(bestPnl);
+            pnlEl.style.color  = bestPnl >= 0 ? '#02c076' : '#f84960';
 
-            logEl.innerHTML = s.logs.map((msg) => '<div>' + msg + '</div>').join('');
+            // Logs — filter by desk
+            const btcLogs    = s.logs.filter(l => l.includes('[BTC]')    || !l.includes('[BASKET]'));
+            const basketLogs = s.logs.filter(l => l.includes('[BASKET]') || !l.includes('[BTC]'));
+            logBtcEl.innerHTML    = btcLogs.map(msg    => '<div>' + msg + '</div>').join('');
+            logBasketEl.innerHTML = basketLogs.map(msg => '<div>' + msg + '</div>').join('');
 
-            pushChartPoint(btcChart, s.ts, s.desk_equity.btc);
+            pushChartPoint(btcChart,    s.ts, s.desk_equity.btc);
             pushChartPoint(basketChart, s.ts, s.desk_equity.basket);
         }
 
-        async function postAction(path, model) {
+        async function postAction(path, model, extra) {
             await fetch(path, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model })
+                body: JSON.stringify(Object.assign({ model }, extra))
             });
             await refreshState();
         }
 
-        availableEl.addEventListener('click', async (e) => {
+        // Available BTC pool → select to BTC desk
+        availBtcEl.addEventListener('click', async (e) => {
             const chip = e.target.closest('.chip');
             if (!chip) return;
-            await postAction('/api/select', chip.dataset.name);
+            await postAction('/api/select', chip.dataset.name, { desk: 'btc' });
         });
 
+        // Available Basket pool → select to Basket desk
+        availBasketEl.addEventListener('click', async (e) => {
+            const chip = e.target.closest('.chip');
+            if (!chip) return;
+            await postAction('/api/select', chip.dataset.name, { desk: 'basket' });
+        });
+
+        // Active chips → deselect
         selectedBtcEl.addEventListener('click', async (e) => {
             const chip = e.target.closest('.chip');
             if (!chip) return;
             await postAction('/api/deselect', chip.dataset.name);
         });
-
         selectedBasketEl.addEventListener('click', async (e) => {
             const chip = e.target.closest('.chip');
             if (!chip) return;
@@ -269,10 +296,11 @@
         });
 
         async function refreshState() {
-            const response = await fetch('/api/state', { cache: 'no-store' });
-            if (!response.ok) return;
-            const next = await response.json();
-            renderState(next);
+            try {
+                const r = await fetch('/api/state', { cache: 'no-store' });
+                if (!r.ok) return;
+                renderState(await r.json());
+            } catch (_) {}
         }
 
         setInterval(refreshState, 2000);
