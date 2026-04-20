@@ -177,10 +177,11 @@ class ArenaHandler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:
-        if self.path == "/api/state":
+        path = self.path.split("?", 1)[0]
+        if path in {"/api/state", "/data"}:
             self._json(200, self.state.snapshot())
             return
-        if self.path == "/":
+        if path == "/":
             self.path = "/alpha_arena_live.html"
         super().do_GET()
 
