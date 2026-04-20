@@ -123,11 +123,16 @@ class ArenaState:
             if not m or m["selected"]:
                 return False
             assigned_desk = desk if desk in ("btc", "basket") else "btc"
+            ref_price = self.prices["btc"] if assigned_desk == "btc" else self.prices["basket"]
+            action = 1 if random.random() < m["bias"] else -1
             m["selected"] = True
             m["desk"] = assigned_desk
-            m["pos"] = 0.0
-            m["entry"] = self.prices["btc"] if m["desk"] == "btc" else self.prices["basket"]
-            self.add_log(f"{name} selected to {m['desk'].upper()} desk")
+            # Start with a small initial position so desk P&L moves immediately.
+            m["pos"] = action * (m["balance"] / max(ref_price, 1.0)) * 0.3
+            m["entry"] = ref_price
+            m["signal_source"] = "sim"
+            m["last_signal"] = "LONG" if action > 0 else "SHORT"
+            self.add_log(f"{name} selected to {m['desk'].upper()} desk [{m['last_signal']}] @ ${ref_price:,.2f}")
             return True
 
     def deselect_model(self, name: str) -> bool:

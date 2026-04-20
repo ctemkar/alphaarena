@@ -33,11 +33,14 @@
         .chip:hover { border-color: #f0b90b; }
         .chip.selected-chip { border-color: #2b6cb0; background: #0d1b2e; }
         .chip.selected-chip:hover { border-color: #f84960; }
+        .chip.chip-locked { opacity: 0.6; cursor: not-allowed; border-color: #3a3f47; }
+        .chip.chip-locked:hover { border-color: #3a3f47; }
         .chip-name { font-weight: 600; }
         .chip-pnl-pos { color: #02c076; }
         .chip-pnl-neg { color: #f84960; }
         .chip-pnl-flat { color: #848e9c; }
         .badge-ai { font-size: 20px; background: #a7f432; color: #0b0e11; border-radius: 4px; padding: 2px 8px; margin-left: 6px; font-weight: 700; vertical-align: middle; }
+        .badge-lock { font-size: 18px; background: #3a3f47; color: #d1d4dc; border-radius: 4px; padding: 2px 8px; margin-left: 6px; font-weight: 700; vertical-align: middle; }
         .sig-long  { font-size: 20px; color: #02c076; background: rgba(2,192,118,.15); border-radius: 4px; padding: 2px 8px; margin-left: 6px; font-weight: 700; }
         .sig-short { font-size: 20px; color: #f84960; background: rgba(248,73,96,.15);  border-radius: 4px; padding: 2px 8px; margin-left: 6px; font-weight: 700; }
         .sig-hold  { font-size: 20px; color: #f0b90b; background: rgba(240,185,11,.15); border-radius: 4px; padding: 2px 8px; margin-left: 6px; font-weight: 700; }
@@ -164,7 +167,21 @@
         function makeDeskChart(canvasId, label, color) {
             return new Chart(document.getElementById(canvasId).getContext('2d'), {
                 type: 'line',
-                data: { labels: [], datasets: [{ label, borderColor: color, backgroundColor: 'transparent', data: [], tension: 0.2, pointRadius: 0, borderWidth: 2 }] },
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label,
+                        borderColor: color,
+                        backgroundColor: 'transparent',
+                        data: [],
+                        tension: 0.2,
+                        pointRadius: 0,
+                        borderWidth: 2,
+                        segment: {
+                            borderColor: (ctx) => (ctx.p1.parsed.y < 0 ? '#f84960' : color),
+                        },
+                    }],
+                },
                 options: {
                     responsive: true, maintainAspectRatio: false, animation: false,
                     plugins: { legend: { display: false } },
@@ -190,13 +207,17 @@
         function formatPnl(v) { const n = Number(v.toFixed(2)); return (n >= 0 ? '+' : '') + '$' + n.toLocaleString(); }
         function countSelected(models, desk) { return Object.values(models).filter(m => m.selected && m.desk === desk).length; }
 
-        function chipHtml(name, m, pnl, ollamaModels) {
+        function chipHtml(name, m, pnl, ollamaModels, opts = {}) {
+            const locked = !!opts.locked;
+            const lockedLabel = opts.lockedLabel || '';
             const aiBadge  = ollamaModels.includes(name) ? '<span class="badge-ai">AI</span>' : '';
+            const lockBadge = lockedLabel ? '<span class="badge-lock">' + lockedLabel + '</span>' : '';
             const sigClass = m.last_signal === 'LONG' ? 'sig-long' : m.last_signal === 'SHORT' ? 'sig-short' : 'sig-hold';
             const sigLabel = m.last_signal && m.last_signal !== 'IDLE'
                 ? '<span class="' + sigClass + '">' + m.last_signal + '</span>' : '';
-            return '<button class="chip" data-name="' + name + '">'
-                + '<span class="chip-name" style="color:' + m.color + '">' + name + aiBadge + sigLabel + '</span>'
+            const classes = 'chip' + (locked ? ' chip-locked' : '');
+            return '<button class="' + classes + '" data-name="' + name + '" data-locked="' + (locked ? '1' : '0') + '">'
+                + '<span class="chip-name" style="color:' + m.color + '">' + name + aiBadge + lockBadge + sigLabel + '</span>'
                 + '<span class="' + pnlClass(pnl) + '">' + formatPnl(pnl) + '</span>'
                 + '</button>';
         }
@@ -227,13 +248,26 @@
             if (basketDeskPnlEl)  basketDeskPnlEl.innerText  = formatPnl(s.desk_equity.basket - countSelected(models, 'basket') * 10000);
 
             // Split models into groups
-            const unselected     = names.filter(n => !models[n].selected);
             const btcSelected    = names.filter(n => models[n].selected && models[n].desk === 'btc');
             const basketSelected = names.filter(n => models[n].selected && models[n].desk === 'basket');
 
-            // Available pools — all unselected shown in BOTH desks
-            availBtcEl.innerHTML    = unselected.map(n => chipHtml(n, models[n], models[n].preview_pnl, ollama)).join('');
-            availBasketEl.innerHTML = unselected.map(n => chipHtml(n, models[n], models[n].preview_pnl, ollama)).join('');
+            // Available pools — show ALL models in BOTH desks.
+            // Already-selected models stay visible but are locked.
+            availBtcEl.innerHTML = names.map((n) => {
+                const m = models[n];
+                const locked = m.selected;
+                const lockedLabel = locked ? ('ON ' + (m.desk || '').toUpperCase()) : '';
+                const pnl = m.selected ? (m.balance - 10000) : m.preview_pnl;
+                return chipHtml(n, m, pnl, ollama, { locked, lockedLabel });
+            }).join('');
+
+            availBasketEl.innerHTML = names.map((n) => {
+                const m = models[n];
+                const locked = m.selected;
+                const lockedLabel = locked ? ('ON ' + (m.desk || '').toUpperCase()) : '';
+                const pnl = m.selected ? (m.balance - 10000) : m.preview_pnl;
+                return chipHtml(n, m, pnl, ollama, { locked, lockedLabel });
+            }).join('');
 
             // Active on each desk
             selectedBtcEl.innerHTML    = btcSelected.map(n => chipHtml(n, models[n], models[n].balance - 10000, ollama)).join('');
@@ -256,8 +290,8 @@
             logBtcEl.innerHTML    = btcLogs.map(msg    => '<div>' + msg + '</div>').join('');
             logBasketEl.innerHTML = basketLogs.map(msg => '<div>' + msg + '</div>').join('');
 
-            pushChartPoint(btcChart,    s.ts, s.desk_equity.btc);
-            pushChartPoint(basketChart, s.ts, s.desk_equity.basket);
+            pushChartPoint(btcChart,    s.ts, btcPnl);
+            pushChartPoint(basketChart, s.ts, basketPnl);
         }
 
         async function postAction(path, model, extra) {
@@ -273,6 +307,7 @@
         availBtcEl.addEventListener('click', async (e) => {
             const chip = e.target.closest('.chip');
             if (!chip) return;
+            if (chip.dataset.locked === '1') return;
             await postAction('/api/select', chip.dataset.name, { desk: 'btc' });
         });
 
@@ -280,6 +315,7 @@
         availBasketEl.addEventListener('click', async (e) => {
             const chip = e.target.closest('.chip');
             if (!chip) return;
+            if (chip.dataset.locked === '1') return;
             await postAction('/api/select', chip.dataset.name, { desk: 'basket' });
         });
 
