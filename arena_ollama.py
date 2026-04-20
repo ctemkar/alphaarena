@@ -12,7 +12,7 @@ def load_env():
 
 ENV = load_env()
 OR_KEY = ENV.get('OPENROUTER_API_KEY', '')
-PORT = 8000
+PORT = int(os.getenv("PORT", "8000"))
 OLLAMA_TIMEOUT = 8
 ARENA_CYCLE_SECONDS = 1
 MAX_LEVERAGE = 20
