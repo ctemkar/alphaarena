@@ -1,4 +1,4 @@
-import http.server, socketserver, json, threading, time, urllib.request, os
+import http.server, socketserver, json, threading, time, urllib.request, os, re
 
 def load_env():
     env = {}
@@ -36,7 +36,7 @@ ARENA_DATA = {
     "Mistral (7B)": {"bal": 100.0, "pos": 0, "color": "#f0b90b", "provider": "ollama", "model": "mistral:latest", "temperature": 0.35, "busy": False, "frozen_total": None},
     "Gemma 4": {"bal": 100.0, "pos": 0, "color": "#34d399", "provider": "ollama", "model": "gemma4:latest", "temperature": 0.55, "busy": False, "frozen_total": None},
     "Qwen 3.5": {"bal": 100.0, "pos": 0, "color": "#8b5cf6", "provider": "ollama", "model": "qwen3.5:latest", "temperature": 0.30, "busy": False, "frozen_total": None},
-    "Llama 3 (8B)": {"bal": 100.0, "pos": 0, "color": "#fb7185", "provider": "ollama", "model": "llama3:latest", "temperature": 0.40, "busy": False, "frozen_total": None},
+    "finance-llama-8b": {"bal": 100.0, "pos": 0, "color": "#fb7185", "provider": "ollama", "model": "martain7r/finance-llama-8b:fp16", "temperature": 0.35, "busy": False, "frozen_total": None},
     "Phi-3": {"bal": 100.0, "pos": 0, "color": "#22c55e", "provider": "ollama", "model": "phi3:latest", "temperature": 0.50, "busy": False, "frozen_total": None}
 }
 
@@ -135,18 +135,42 @@ def extract_decision(text):
         return "SELL"
     return None
 
+def infer_decision_from_prompt(prompt):
+    score = 0.0
+    found_series = False
+    for series in re.findall(r'\[([^\]]+)\]', prompt or ""):
+        nums = []
+        for part in series.split(','):
+            part = part.strip()
+            try:
+                nums.append(float(part))
+            except ValueError:
+                continue
+        if len(nums) >= 2:
+            found_series = True
+            score += nums[-1] - nums[0]
+    if not found_series:
+        return None
+    if score > 0:
+        return "BUY"
+    if score < 0:
+        return "SELL"
+    return None
+
 def request_model_text(bot, prompt):
     with MODEL_SEMAPHORE:
+        is_reasoning_model = False
         if bot["provider"] == "ollama":
             model = resolve_ollama_model(bot["model"])
             if not model:
                 raise RuntimeError(f"model missing ({bot['model']})")
+            is_reasoning_model = any(tag in model.lower() for tag in ["deepseek-r1", "qwq", "r1"])
             url = "http://localhost:11434/api/generate"
             payload = json.dumps({
                 "model": model,
                 "prompt": prompt,
                 "stream": False,
-                "options": {"num_predict": 6, "temperature": bot.get("temperature", 0.35)}
+                "options": {"num_predict": 32 if is_reasoning_model else 6, "temperature": bot.get("temperature", 0.35)}
             }).encode()
         else:
             if not OR_KEY:
@@ -163,9 +187,12 @@ def request_model_text(bot, prompt):
         if bot["provider"] == "openrouter":
             req.add_header("Authorization", f"Bearer {OR_KEY}")
 
-        with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT if bot["provider"] == "ollama" else 10) as r:
+        timeout = (max(OLLAMA_TIMEOUT, 12) if is_reasoning_model else OLLAMA_TIMEOUT) if bot["provider"] == "ollama" else 10
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             res = json.loads(r.read().decode())
-            return res["response"] if bot["provider"] == "ollama" else res["choices"][0]["message"]["content"]
+            if bot["provider"] == "ollama":
+                return ((res.get("response") or "") + "\n" + (res.get("thinking") or "")).strip()
+            return res["choices"][0]["message"]["content"]
 
 def get_model_decision(bot, prompt):
     attempts = [
@@ -179,7 +206,14 @@ def get_model_decision(bot, prompt):
 
     last_text = ""
     for attempt_prompt in attempts:
-        last_text = request_model_text(bot, attempt_prompt)
+        try:
+            last_text = request_model_text(bot, attempt_prompt)
+        except Exception:
+            if bot.get("provider") == "ollama" and "deepseek-r1" in bot.get("model", "").lower():
+                inferred = infer_decision_from_prompt(prompt)
+                if inferred:
+                    return inferred
+            continue
         decision = extract_decision(last_text)
         if decision:
             return decision
@@ -190,6 +224,8 @@ def get_model_decision(bot, prompt):
         return "BUY"
     if any(w in upper for w in ["BEAR", "DOWN", "SHORT", "DROP"]):
         return "SELL"
+    if bot.get("provider") == "ollama" and "deepseek-r1" in bot.get("model", "").lower():
+        return infer_decision_from_prompt(prompt)
     return None
 
 def reset_all_state():
@@ -233,6 +269,8 @@ def resolve_ollama_model(target):
         "qwen2.5-coder": ["qwen2.5-coder:latest", "qwen3.5:latest"],
         "deepseek-r1": ["deepseek-r1:latest", "deepseek-r1:8b", "qwen3.5:latest", "phi3:latest"],
         "llama3.2": ["llama3.2:latest", "llama3:latest"],
+        "finance-llama-8b": ["martain7r/finance-llama-8b:fp16", "finance-llama-8b:latest", "llama3:latest"],
+        "martain7r/finance-llama-8b": ["martain7r/finance-llama-8b:fp16", "finance-llama-8b:latest", "llama3:latest"],
         "mistral": ["mistral:latest"],
         "gemma4": ["gemma4:latest", "gemma3:latest"]
     }
