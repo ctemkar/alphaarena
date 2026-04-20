@@ -41,6 +41,9 @@
         .two-col { display: grid; grid-template-columns: 1fr 360px; gap: 16px; height: 510px; }
         .panel { background: #181a20; border: 1px solid #2b2f36; border-radius: 8px; padding: 16px; display: flex; flex-direction: column; overflow: hidden; }
         .panel h3 { margin: 0 0 10px 0; font-size: 16px; }
+        .chart-grid { display: grid; grid-template-rows: 1fr 1fr; gap: 12px; flex: 1; min-height: 0; }
+        .chart-section { border: 1px solid #2b2f36; border-radius: 8px; padding: 10px; display: flex; flex-direction: column; min-height: 0; }
+        .chart-section h4 { margin: 0 0 8px 0; font-size: 14px; color: #eaecef; }
         .chart-container { flex: 1; min-height: 0; }
         .chart-note { margin-top: 8px; color: #848e9c; font-size: 13px; }
 
@@ -85,8 +88,19 @@
     <div class="two-col">
         <div class="panel">
             <h3>Desk Performance (USD)</h3>
-            <div class="chart-container">
-                <canvas id="mainChart"></canvas>
+            <div class="chart-grid">
+                <div class="chart-section">
+                    <h4>BTC-Only Desk</h4>
+                    <div class="chart-container">
+                        <canvas id="btcChart"></canvas>
+                    </div>
+                </div>
+                <div class="chart-section">
+                    <h4>Basket Desk</h4>
+                    <div class="chart-container">
+                        <canvas id="basketChart"></canvas>
+                    </div>
+                </div>
             </div>
             <div class="chart-note">Server-side paper executor updates every 2 seconds from live BTC ticker with simulated basket legs.</div>
         </div>
@@ -121,29 +135,43 @@
 
         let state = null;
 
-        const chart = new Chart(document.getElementById('mainChart').getContext('2d'), {
-            type: 'line',
-            data: {
-                labels: [],
-                datasets: [
-                    { label: 'BTC-Only Desk', borderColor: '#f0b90b', backgroundColor: 'transparent', data: [], tension: 0.2, pointRadius: 0, borderWidth: 2 },
-                    { label: 'Basket Desk', borderColor: '#00ccff', backgroundColor: 'transparent', data: [], tension: 0.2, pointRadius: 0, borderWidth: 2 }
-                ]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                animation: false,
-                plugins: { legend: { labels: { color: '#848e9c', font: { size: 11 } } } },
-                scales: {
-                    x: { display: false },
-                    y: {
-                        grid: { color: '#2b2f36' },
-                        ticks: { color: '#848e9c', callback: (v) => '$' + Number(v).toLocaleString() }
+        function makeDeskChart(canvasId, label, color) {
+            return new Chart(document.getElementById(canvasId).getContext('2d'), {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        { label, borderColor: color, backgroundColor: 'transparent', data: [], tension: 0.2, pointRadius: 0, borderWidth: 2 }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { display: false },
+                        y: {
+                            grid: { color: '#2b2f36' },
+                            ticks: { color: '#848e9c', callback: (v) => '$' + Number(v).toLocaleString() }
+                        }
                     }
                 }
+            });
+        }
+
+        const btcChart = makeDeskChart('btcChart', 'BTC-Only Desk', '#f0b90b');
+        const basketChart = makeDeskChart('basketChart', 'Basket Desk', '#00ccff');
+
+        function pushChartPoint(targetChart, ts, value) {
+            targetChart.data.labels.push(ts);
+            targetChart.data.datasets[0].data.push(Number(value.toFixed(2)));
+            if (targetChart.data.labels.length > 60) {
+                targetChart.data.labels.shift();
+                targetChart.data.datasets[0].data.shift();
             }
-        });
+            targetChart.update('none');
+        }
 
         function pnlClass(v) {
             if (v > 0) return 'chip-pnl-pos';
@@ -220,15 +248,8 @@
 
             logEl.innerHTML = s.logs.map((msg) => '<div>' + msg + '</div>').join('');
 
-            chart.data.labels.push(s.ts);
-            chart.data.datasets[0].data.push(Number(s.desk_equity.btc.toFixed(2)));
-            chart.data.datasets[1].data.push(Number(s.desk_equity.basket.toFixed(2)));
-            if (chart.data.labels.length > 60) {
-                chart.data.labels.shift();
-                chart.data.datasets[0].data.shift();
-                chart.data.datasets[1].data.shift();
-            }
-            chart.update('none');
+            pushChartPoint(btcChart, s.ts, s.desk_equity.btc);
+            pushChartPoint(basketChart, s.ts, s.desk_equity.basket);
         }
 
         async function postAction(path, model) {
