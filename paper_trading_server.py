@@ -186,6 +186,7 @@ class ArenaState:
             "day": day,
             "samples": 0,
             "signals": 0,
+            "trades": 0,
             "wins": 0,
             "losses": 0,
             "win_rate_pct": 0.0,
@@ -215,11 +216,12 @@ class ArenaState:
 
         summary = self._default_daily_summary(day)
         model_pnl: dict[str, float] = {}
-        pnl_deltas: list[float] = []
+        trade_pnls: list[float] = []
         wins = 0
         losses = 0
         signals = 0
         samples = 0
+        trades = 0
 
         for raw in log_path.read_text(encoding="utf-8").splitlines():
             if not raw.strip():
@@ -242,12 +244,13 @@ class ArenaState:
                 signals += 1
                 continue
 
-            if rtype == "pnl":
+            if rtype == "trade":
                 try:
-                    delta = float(rec.get("pnl_delta", 0.0))
+                    delta = float(rec.get("trade_pnl", 0.0))
                 except (TypeError, ValueError):
                     continue
-                pnl_deltas.append(delta)
+                trades += 1
+                trade_pnls.append(delta)
                 if delta > 0:
                     wins += 1
                 elif delta < 0:
@@ -256,16 +259,16 @@ class ArenaState:
                 if model:
                     model_pnl[model] = model_pnl.get(model, 0.0) + delta
 
-        total_pnl = sum(pnl_deltas)
-        trades = wins + losses
+        total_pnl = sum(trade_pnls)
         expectancy = (total_pnl / trades) if trades else 0.0
-        win_rate = (wins / trades * 100.0) if trades else 0.0
+        decision_trades = wins + losses
+        win_rate = (wins / decision_trades * 100.0) if decision_trades else 0.0
 
         # Drawdown on cumulative realized P&L trajectory.
         equity = 0.0
         peak = 0.0
         max_dd = 0.0
-        for d in pnl_deltas:
+        for d in trade_pnls:
             equity += d
             if equity > peak:
                 peak = equity
@@ -284,6 +287,7 @@ class ArenaState:
         summary.update({
             "samples": samples,
             "signals": signals,
+            "trades": trades,
             "wins": wins,
             "losses": losses,
             "win_rate_pct": round(win_rate, 2),
@@ -411,6 +415,8 @@ class ArenaState:
             "preview_pnl": 0.0,
             "signal_source": "sim",  # 'sim' | 'ai'
             "last_signal": "IDLE",   # LONG | SHORT | HOLD | IDLE
+            "trade_side": "FLAT",    # FLAT | LONG | SHORT
+            "trade_open_balance": START_BALANCE,
         }
         return {
             "color": color,
@@ -420,6 +426,32 @@ class ArenaState:
                 "basket": dict(base_slot),
             },
         }
+
+    def _close_trade_if_open(self, model_name: str, desk: str, slot: dict, reason: str, price: float) -> None:
+        side = slot.get("trade_side", "FLAT")
+        if side not in {"LONG", "SHORT"}:
+            return
+        trade_pnl = slot["balance"] - slot.get("trade_open_balance", slot["balance"])
+        _log_movement({
+            "type": "trade",
+            "model": model_name,
+            "desk": desk,
+            "side": side,
+            "close_reason": reason,
+            "price": round(price, 2),
+            "trade_pnl": round(trade_pnl, 4),
+            "win": trade_pnl > 0,
+        })
+        slot["trade_side"] = "FLAT"
+        slot["trade_open_balance"] = slot["balance"]
+
+    def _roll_trade_on_signal(self, model_name: str, desk: str, slot: dict, new_side: str, price: float, reason: str) -> None:
+        old_side = slot.get("trade_side", "FLAT")
+        if old_side in {"LONG", "SHORT"} and old_side != new_side:
+            self._close_trade_if_open(model_name, desk, slot, reason, price)
+        if new_side in {"LONG", "SHORT"} and old_side != new_side:
+            slot["trade_side"] = new_side
+            slot["trade_open_balance"] = slot["balance"]
 
     def add_log(self, message: str) -> None:
         self.logs.insert(0, f"[{now_ts()}] {message}")
@@ -452,6 +484,7 @@ class ArenaState:
             slot["entry"] = ref_price
             slot["signal_source"] = "sim"
             slot["last_signal"] = "LONG" if action > 0 else "SHORT"
+            self._roll_trade_on_signal(name, assigned_desk, slot, slot["last_signal"], ref_price, "select")
             self.add_log(f"{name} selected to {assigned_desk.upper()} desk [{slot['last_signal']}] @ ${ref_price:,.2f}")
             return True
 
@@ -466,6 +499,8 @@ class ArenaState:
                 slot = m["desk_state"][d]
                 if not slot["selected"]:
                     continue
+                ref_price = self.prices["btc"] if d == "btc" else self.prices["basket"]
+                self._close_trade_if_open(name, d, slot, "deselect", ref_price)
                 slot["selected"] = False
                 # Clear accumulated state so removed models do not carry P&L
                 # back into totals if they are selected again later.
@@ -474,6 +509,8 @@ class ArenaState:
                 slot["entry"] = 0.0
                 slot["signal_source"] = "sim"
                 slot["last_signal"] = "IDLE"
+                slot["trade_side"] = "FLAT"
+                slot["trade_open_balance"] = START_BALANCE
                 self.add_log(f"{name} deselected from {d.upper()} desk")
                 changed = True
             return changed
@@ -557,6 +594,7 @@ class ArenaState:
                         side = "LONG" if action > 0 else "SHORT"
                         slot["signal_source"] = "sim"
                         slot["last_signal"] = side
+                        self._roll_trade_on_signal(name, desk, slot, side, ref_price, "signal_flip")
                         self.add_log(f"{name} [{desk.upper()}]: {side} @ ${ref_price:,.2f} [sim]")
                         _log_movement({
                             "type":   "signal",
@@ -589,6 +627,8 @@ class ArenaState:
             side = "LONG" if action == 1 else ("SHORT" if action == -1 else "HOLD")
             slot["signal_source"] = "ai"
             slot["last_signal"] = side
+            if side in {"LONG", "SHORT"}:
+                self._roll_trade_on_signal(name, desk_key, slot, side, ref_price, "signal_flip")
             desk = desk_key.upper()
             live_side = side
             self.add_log(f"{name} [{desk}]: {side} @ ${ref_price:,.2f} [AI]")

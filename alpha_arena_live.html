@@ -236,11 +236,12 @@
             const best = (summary.best_model || '-') + ' (' + formatPnl(Number(summary.best_model_pnl_usd || 0)) + ')';
             const worst = (summary.worst_model || '-') + ' (' + formatPnl(Number(summary.worst_model_pnl_usd || 0)) + ')';
             const signals = Number(summary.signals || 0);
+            const trades = Number(summary.trades || 0);
             const samples = Number(summary.samples || 0);
             dailySummaryEl.innerHTML =
                 'Win rate: <strong>' + win + '</strong> | Expectancy: <strong>' + exp + '</strong> | Max DD: <strong>' + mdd + '</strong><br>' +
                 'Best: <strong>' + best + '</strong> | Worst: <strong>' + worst + '</strong><br>' +
-                'Signals: <strong>' + signals + '</strong> | Samples: <strong>' + samples + '</strong>';
+                'Trades: <strong>' + trades + '</strong> | Signals: <strong>' + signals + '</strong> | Samples: <strong>' + samples + '</strong>';
         }
 
         function chipHtml(name, m, pnl, ollamaModels, opts = {}) {
