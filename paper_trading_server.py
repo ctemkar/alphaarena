@@ -142,8 +142,13 @@ class ArenaState:
                 return False
             m["selected"] = False
             m["desk"] = None
+            # Clear accumulated state so removed models do not carry P&L
+            # back into totals if they are selected again later.
+            m["balance"] = START_BALANCE
             m["pos"] = 0.0
             m["entry"] = 0.0
+            m["signal_source"] = "sim"
+            m["last_signal"] = "IDLE"
             self.add_log(f"{name} deselected")
             return True
 

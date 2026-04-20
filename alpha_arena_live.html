@@ -206,6 +206,11 @@
         function pnlClass(v) { return v > 0 ? 'chip-pnl-pos' : v < 0 ? 'chip-pnl-neg' : 'chip-pnl-flat'; }
         function formatPnl(v) { const n = Number(v.toFixed(2)); return (n >= 0 ? '+' : '') + '$' + n.toLocaleString(); }
         function countSelected(models, desk) { return Object.values(models).filter(m => m.selected && m.desk === desk).length; }
+        function applyPnlText(el, value) {
+            if (!el) return;
+            el.innerText = formatPnl(value);
+            el.style.color = value > 0 ? '#02c076' : value < 0 ? '#f84960' : '#848e9c';
+        }
 
         function chipHtml(name, m, pnl, ollamaModels, opts = {}) {
             const locked = !!opts.locked;
@@ -243,9 +248,12 @@
             if (modeEl)           modeEl.innerText           = s.status.mode;
 
             // Desk prices & PnL
-            if (btcDeskPnlEl)     btcDeskPnlEl.innerText     = formatPnl(s.desk_equity.btc - countSelected(models, 'btc') * 10000);
+            const btcPnl    = s.desk_equity.btc    - countSelected(models, 'btc') * 10000;
+            const basketPnl = s.desk_equity.basket - countSelected(models, 'basket') * 10000;
+
+            applyPnlText(btcDeskPnlEl, btcPnl);
             if (basketPriceDeskEl) basketPriceDeskEl.innerText = '$' + Number(s.prices.basket).toLocaleString(undefined, { maximumFractionDigits: 2 });
-            if (basketDeskPnlEl)  basketDeskPnlEl.innerText  = formatPnl(s.desk_equity.basket - countSelected(models, 'basket') * 10000);
+            applyPnlText(basketDeskPnlEl, basketPnl);
 
             // Split models into groups
             const btcSelected    = names.filter(n => models[n].selected && models[n].desk === 'btc');
@@ -278,11 +286,8 @@
 
             activeModelsEl.innerText = String(btcSelected.length + basketSelected.length);
 
-            const btcPnl    = s.desk_equity.btc    - countSelected(models, 'btc')    * 10000;
-            const basketPnl = s.desk_equity.basket - countSelected(models, 'basket') * 10000;
-            const bestPnl   = Math.max(btcPnl, basketPnl, 0);
-            pnlEl.innerText    = formatPnl(bestPnl);
-            pnlEl.style.color  = bestPnl >= 0 ? '#02c076' : '#f84960';
+            const bestPnl   = Math.max(btcPnl, basketPnl);
+            applyPnlText(pnlEl, bestPnl);
 
             // Logs — filter by desk
             const btcLogs    = s.logs.filter(l => l.includes('[BTC]')    || !l.includes('[BASKET]'));
