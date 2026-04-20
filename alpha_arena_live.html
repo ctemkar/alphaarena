@@ -83,7 +83,7 @@
 
     <div class="stats">
         <div class="card"><h4>Live BTC Price</h4><div id="btc-price" class="val">--</div></div>
-        <div class="card"><h4>Best Desk PnL</h4><div id="pnl-val" class="val" style="color:#02c076">+$0.00</div></div>
+        <div class="card"><h4>Total PnL</h4><div id="pnl-val" class="val" style="color:#02c076">+$0.00</div></div>
         <div class="card"><h4>Selected Models</h4><div id="active-models" class="val">0</div></div>
         <div class="card"><h4>Mode</h4><div id="mode-val" class="val" style="color:#f0b90b;font-size:36px">PAPER</div></div>
     </div>
@@ -187,7 +187,14 @@
                     plugins: { legend: { display: false } },
                     scales: {
                         x: { display: false },
-                        y: { grid: { color: '#2b2f36' }, ticks: { color: '#848e9c', font: { size: 22 }, callback: (v) => '$' + Number(v).toLocaleString() } }
+                        y: {
+                            grid: { color: '#2b2f36' },
+                            ticks: {
+                                color: '#848e9c',
+                                font: { size: 22 },
+                                callback: (v) => formatPnl(Number(v)),
+                            },
+                        }
                     }
                 }
             });
@@ -303,8 +310,8 @@
 
             activeModelsEl.innerText = String(btcSelected.length + basketSelected.length);
 
-            const bestPnl   = Math.max(btcPnl, basketPnl);
-            applyPnlText(pnlEl, bestPnl);
+            const totalPnl = btcPnl + basketPnl;
+            applyPnlText(pnlEl, totalPnl);
 
             // Logs — filter by desk
             const btcLogs    = s.logs.filter(l => l.includes('[BTC]')    || !l.includes('[BASKET]'));
