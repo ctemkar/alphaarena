@@ -175,7 +175,13 @@ class ArenaState:
         return ["BTCUSDT"]
 
     def _portfolio_pnl(self) -> float:
-        return sum((m["balance"] - START_BALANCE) for m in self.models.values() if m["selected"])
+        total = 0.0
+        for m in self.models.values():
+            for desk in ("btc", "basket"):
+                slot = m["desk_state"][desk]
+                if slot["selected"]:
+                    total += (slot["balance"] - START_BALANCE)
+        return total
 
     def _evaluate_guardrails(self) -> None:
         today = datetime.utcnow().strftime("%Y-%m-%d")
@@ -262,17 +268,22 @@ class ArenaState:
 
     @staticmethod
     def _mk_model(color: str, bias: float) -> dict:
-        return {
-            "color": color,
-            "bias": bias,
+        base_slot = {
             "selected": False,
-            "desk": None,
             "balance": START_BALANCE,
             "pos": 0.0,
             "entry": 0.0,
             "preview_pnl": 0.0,
-            "signal_source": "sim",   # 'sim' | 'ai'
-            "last_signal": "IDLE",    # LONG | SHORT | HOLD | IDLE
+            "signal_source": "sim",  # 'sim' | 'ai'
+            "last_signal": "IDLE",   # LONG | SHORT | HOLD | IDLE
+        }
+        return {
+            "color": color,
+            "bias": bias,
+            "desk_state": {
+                "btc": dict(base_slot),
+                "basket": dict(base_slot),
+            },
         }
 
     def add_log(self, message: str) -> None:
@@ -284,7 +295,7 @@ class ArenaState:
         p["basket"] = (p["btc"] + p["eth"] * 12 + p["sol"] * 300 + p["bnb"] * 80) / 4
 
     def selected_count(self, desk: str) -> int:
-        return sum(1 for m in self.models.values() if m["selected"] and m["desk"] == desk)
+        return sum(1 for m in self.models.values() if m["desk_state"][desk]["selected"])
 
     def next_desk(self) -> str:
         return "btc" if self.selected_count("btc") <= self.selected_count("basket") else "basket"
@@ -292,37 +303,45 @@ class ArenaState:
     def select_model(self, name: str, desk: str = "btc") -> bool:
         with self.lock:
             m = self.models.get(name)
-            if not m or m["selected"]:
+            if not m:
                 return False
             assigned_desk = desk if desk in ("btc", "basket") else "btc"
+            slot = m["desk_state"][assigned_desk]
+            if slot["selected"]:
+                return False
             ref_price = self.prices["btc"] if assigned_desk == "btc" else self.prices["basket"]
             action = 1 if random.random() < m["bias"] else -1
-            m["selected"] = True
-            m["desk"] = assigned_desk
+            slot["selected"] = True
             # Start with a small initial position so desk P&L moves immediately.
-            m["pos"] = action * (m["balance"] / max(ref_price, 1.0)) * 0.3
-            m["entry"] = ref_price
-            m["signal_source"] = "sim"
-            m["last_signal"] = "LONG" if action > 0 else "SHORT"
-            self.add_log(f"{name} selected to {m['desk'].upper()} desk [{m['last_signal']}] @ ${ref_price:,.2f}")
+            slot["pos"] = action * (slot["balance"] / max(ref_price, 1.0)) * 0.3
+            slot["entry"] = ref_price
+            slot["signal_source"] = "sim"
+            slot["last_signal"] = "LONG" if action > 0 else "SHORT"
+            self.add_log(f"{name} selected to {assigned_desk.upper()} desk [{slot['last_signal']}] @ ${ref_price:,.2f}")
             return True
 
-    def deselect_model(self, name: str) -> bool:
+    def deselect_model(self, name: str, desk: str | None = None) -> bool:
         with self.lock:
             m = self.models.get(name)
-            if not m or not m["selected"]:
+            if not m:
                 return False
-            m["selected"] = False
-            m["desk"] = None
-            # Clear accumulated state so removed models do not carry P&L
-            # back into totals if they are selected again later.
-            m["balance"] = START_BALANCE
-            m["pos"] = 0.0
-            m["entry"] = 0.0
-            m["signal_source"] = "sim"
-            m["last_signal"] = "IDLE"
-            self.add_log(f"{name} deselected")
-            return True
+            desks = [desk] if desk in ("btc", "basket") else ["btc", "basket"]
+            changed = False
+            for d in desks:
+                slot = m["desk_state"][d]
+                if not slot["selected"]:
+                    continue
+                slot["selected"] = False
+                # Clear accumulated state so removed models do not carry P&L
+                # back into totals if they are selected again later.
+                slot["balance"] = START_BALANCE
+                slot["pos"] = 0.0
+                slot["entry"] = 0.0
+                slot["signal_source"] = "sim"
+                slot["last_signal"] = "IDLE"
+                self.add_log(f"{name} deselected from {d.upper()} desk")
+                changed = True
+            return changed
 
     def refresh_prices(self) -> None:
         prev_prices = self.prices.copy()
@@ -364,74 +383,78 @@ class ArenaState:
 
     def step_models(self) -> None:
         for name, m in self.models.items():
-            ref_price = self.prices["basket"] if m["desk"] == "basket" else self.prices["btc"]
+            for desk in ("btc", "basket"):
+                slot = m["desk_state"][desk]
+                ref_price = self.prices["basket"] if desk == "basket" else self.prices["btc"]
 
-            if m["selected"] and m["pos"] != 0:
-                pnl_delta = (ref_price - m["entry"]) * m["pos"]
-                m["balance"] += pnl_delta
-                m["entry"] = ref_price
-                # Log every significant P&L change for movement analysis.
-                if abs(pnl_delta) >= 0.01:
-                    _log_movement({
-                        "type":      "pnl",
-                        "model":     name,
-                        "desk":      m["desk"],
-                        "price":     round(ref_price, 2),
-                        "pos":       round(m["pos"], 8),
-                        "pnl_delta": round(pnl_delta, 4),
-                        "balance":   round(m["balance"], 4),
-                    })
+                if slot["selected"] and slot["pos"] != 0:
+                    pnl_delta = (ref_price - slot["entry"]) * slot["pos"]
+                    slot["balance"] += pnl_delta
+                    slot["entry"] = ref_price
+                    # Log every significant P&L change for movement analysis.
+                    if abs(pnl_delta) >= 0.01:
+                        _log_movement({
+                            "type":      "pnl",
+                            "model":     name,
+                            "desk":      desk,
+                            "price":     round(ref_price, 2),
+                            "pos":       round(slot["pos"], 8),
+                            "pnl_delta": round(pnl_delta, 4),
+                            "balance":   round(slot["balance"], 4),
+                        })
 
-            # Decide whether to make a new trade this tick
-            should_trade = m["selected"] and random.random() > 0.94
-            if should_trade:
-                ollama_tag = OLLAMA_MODELS.get(name)
-                if ollama_tag:
-                    # Real AI signal — run in a fire-and-forget thread so it
-                    # never blocks the main tick loop.
-                    threading.Thread(
-                        target=self._apply_ollama_signal,
-                        args=(name, ollama_tag, ref_price),
-                        daemon=True,
-                    ).start()
-                else:
-                    action = 1 if random.random() < m["bias"] else -1
-                    m["pos"] = action * (m["balance"] / max(ref_price, 1.0)) * 0.4
-                    m["entry"] = ref_price
-                    side = "LONG" if action > 0 else "SHORT"
-                    m["signal_source"] = "sim"
-                    m["last_signal"] = side
-                    self.add_log(f"{name} [{m['desk'].upper()}]: {side} @ ${ref_price:,.2f} [sim]")
-                    _log_movement({
-                        "type":   "signal",
-                        "model":  name,
-                        "desk":   m["desk"],
-                        "signal": side,
-                        "source": "sim",
-                        "price":  round(ref_price, 2),
-                    })
-                    self._execute_live_signal(name, m["desk"] or "btc", side)
+                # Decide whether to make a new trade this tick
+                should_trade = slot["selected"] and random.random() > 0.94
+                if should_trade:
+                    ollama_tag = OLLAMA_MODELS.get(name)
+                    if ollama_tag:
+                        # Real AI signal — run in a fire-and-forget thread so it
+                        # never blocks the main tick loop.
+                        threading.Thread(
+                            target=self._apply_ollama_signal,
+                            args=(name, desk, ollama_tag, ref_price),
+                            daemon=True,
+                        ).start()
+                    else:
+                        action = 1 if random.random() < m["bias"] else -1
+                        slot["pos"] = action * (slot["balance"] / max(ref_price, 1.0)) * 0.4
+                        slot["entry"] = ref_price
+                        side = "LONG" if action > 0 else "SHORT"
+                        slot["signal_source"] = "sim"
+                        slot["last_signal"] = side
+                        self.add_log(f"{name} [{desk.upper()}]: {side} @ ${ref_price:,.2f} [sim]")
+                        _log_movement({
+                            "type":   "signal",
+                            "model":  name,
+                            "desk":   desk,
+                            "signal": side,
+                            "source": "sim",
+                            "price":  round(ref_price, 2),
+                        })
+                        self._execute_live_signal(name, desk, side)
 
-            m["preview_pnl"] += (random.random() - 0.5) * 18
-            m["preview_pnl"] = max(-500.0, min(500.0, m["preview_pnl"]))
+                slot["preview_pnl"] += (random.random() - 0.5) * 18
+                slot["preview_pnl"] = max(-500.0, min(500.0, slot["preview_pnl"]))
 
-    def _apply_ollama_signal(self, name: str, ollama_tag: str, ref_price: float) -> None:
+    def _apply_ollama_signal(self, name: str, desk_key: str, ollama_tag: str, ref_price: float) -> None:
         """Called in a background thread. Queries Ollama then applies the result."""
-        action = _ollama_signal(ollama_tag, ref_price, self.models[name].get("desk", "btc"))
-        live_desk = "btc"
+        action = _ollama_signal(ollama_tag, ref_price, desk_key)
+        live_desk = desk_key
         live_side = "HOLD"
         with self.lock:
             m = self.models.get(name)
-            if not m or not m["selected"]:
+            if not m:
+                return
+            slot = m["desk_state"][desk_key]
+            if not slot["selected"]:
                 return
             if action != 0:
-                m["pos"] = action * (m["balance"] / max(ref_price, 1.0)) * 0.4
-                m["entry"] = ref_price
+                slot["pos"] = action * (slot["balance"] / max(ref_price, 1.0)) * 0.4
+                slot["entry"] = ref_price
             side = "LONG" if action == 1 else ("SHORT" if action == -1 else "HOLD")
-            m["signal_source"] = "ai"
-            m["last_signal"] = side
-            desk = (m.get("desk") or "btc").upper()
-            live_desk = (m.get("desk") or "btc")
+            slot["signal_source"] = "ai"
+            slot["last_signal"] = side
+            desk = desk_key.upper()
             live_side = side
             self.add_log(f"{name} [{desk}]: {side} @ ${ref_price:,.2f} [AI]")
             _log_movement({
@@ -447,8 +470,8 @@ class ArenaState:
 
     def snapshot(self) -> dict:
         with self.lock:
-            btc_equity = sum(m["balance"] for m in self.models.values() if m["selected"] and m["desk"] == "btc")
-            basket_equity = sum(m["balance"] for m in self.models.values() if m["selected"] and m["desk"] == "basket")
+            btc_equity = sum(m["desk_state"]["btc"]["balance"] for m in self.models.values() if m["desk_state"]["btc"]["selected"])
+            basket_equity = sum(m["desk_state"]["basket"]["balance"] for m in self.models.values() if m["desk_state"]["basket"]["selected"])
             return {
                 "prices": {
                     "btc": self.prices["btc"],
@@ -468,6 +491,7 @@ class ArenaState:
                     "basket": basket_equity,
                 },
                 "models": self.models,
+                "start_balance": START_BALANCE,
                 "logs": self.logs[:],
                 "ts": now_ts(),
             }
@@ -526,7 +550,8 @@ class ArenaHandler(SimpleHTTPRequestHandler):
             desk = data.get("desk", "btc")
             ok = self.state.select_model(model, desk)
         else:
-            ok = self.state.deselect_model(model)
+            desk = data.get("desk")
+            ok = self.state.deselect_model(model, desk if isinstance(desk, str) else None)
         if not ok:
             self._json(409, {"ok": False, "error": "No state change"})
             return

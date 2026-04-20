@@ -205,7 +205,9 @@
 
         function pnlClass(v) { return v > 0 ? 'chip-pnl-pos' : v < 0 ? 'chip-pnl-neg' : 'chip-pnl-flat'; }
         function formatPnl(v) { const n = Number(v.toFixed(2)); return (n >= 0 ? '+' : '') + '$' + n.toLocaleString(); }
-        function countSelected(models, desk) { return Object.values(models).filter(m => m.selected && m.desk === desk).length; }
+        function countSelected(models, desk) {
+            return Object.values(models).filter(m => m.desk_state && m.desk_state[desk] && m.desk_state[desk].selected).length;
+        }
         function applyPnlText(el, value) {
             if (!el) return;
             el.innerText = formatPnl(value);
@@ -232,6 +234,7 @@
             const models = s.models;
             const names  = Object.keys(models);
             const ollama = s.status.ollama_models || [];
+            const startBalance = Number(s.start_balance || 10000);
 
             // Header feed badge
             if (s.status.feed === 'LIVE') {
@@ -248,38 +251,52 @@
             if (modeEl)           modeEl.innerText           = s.status.mode;
 
             // Desk prices & PnL
-            const btcPnl    = s.desk_equity.btc    - countSelected(models, 'btc') * 10000;
-            const basketPnl = s.desk_equity.basket - countSelected(models, 'basket') * 10000;
+            const btcPnl    = s.desk_equity.btc    - countSelected(models, 'btc') * startBalance;
+            const basketPnl = s.desk_equity.basket - countSelected(models, 'basket') * startBalance;
 
             applyPnlText(btcDeskPnlEl, btcPnl);
             if (basketPriceDeskEl) basketPriceDeskEl.innerText = '$' + Number(s.prices.basket).toLocaleString(undefined, { maximumFractionDigits: 2 });
             applyPnlText(basketDeskPnlEl, basketPnl);
 
             // Split models into groups
-            const btcSelected    = names.filter(n => models[n].selected && models[n].desk === 'btc');
-            const basketSelected = names.filter(n => models[n].selected && models[n].desk === 'basket');
+            const btcSelected    = names.filter(n => models[n].desk_state && models[n].desk_state.btc && models[n].desk_state.btc.selected);
+            const basketSelected = names.filter(n => models[n].desk_state && models[n].desk_state.basket && models[n].desk_state.basket.selected);
 
             // Available pools — show ALL models in BOTH desks.
-            // Already-selected models stay visible but are locked.
+            // Lock only if selected in the SAME desk (desks are independent).
             availBtcEl.innerHTML = names.map((n) => {
                 const m = models[n];
-                const locked = m.selected;
-                const lockedLabel = locked ? ('ON ' + (m.desk || '').toUpperCase()) : '';
-                const pnl = m.selected ? (m.balance - 10000) : m.preview_pnl;
-                return chipHtml(n, m, pnl, ollama, { locked, lockedLabel });
+                const btc = m.desk_state ? m.desk_state.btc : null;
+                const locked = !!(btc && btc.selected);
+                const lockedLabel = locked ? 'ON BTC' : '';
+                const pnl = locked ? (btc.balance - startBalance) : ((btc && typeof btc.preview_pnl === 'number') ? btc.preview_pnl : 0);
+                const view = Object.assign({}, m, { last_signal: (btc && btc.last_signal) || 'IDLE' });
+                return chipHtml(n, view, pnl, ollama, { locked, lockedLabel });
             }).join('');
 
             availBasketEl.innerHTML = names.map((n) => {
                 const m = models[n];
-                const locked = m.selected;
-                const lockedLabel = locked ? ('ON ' + (m.desk || '').toUpperCase()) : '';
-                const pnl = m.selected ? (m.balance - 10000) : m.preview_pnl;
-                return chipHtml(n, m, pnl, ollama, { locked, lockedLabel });
+                const basket = m.desk_state ? m.desk_state.basket : null;
+                const locked = !!(basket && basket.selected);
+                const lockedLabel = locked ? 'ON BASKET' : '';
+                const pnl = locked ? (basket.balance - startBalance) : ((basket && typeof basket.preview_pnl === 'number') ? basket.preview_pnl : 0);
+                const view = Object.assign({}, m, { last_signal: (basket && basket.last_signal) || 'IDLE' });
+                return chipHtml(n, view, pnl, ollama, { locked, lockedLabel });
             }).join('');
 
             // Active on each desk
-            selectedBtcEl.innerHTML    = btcSelected.map(n => chipHtml(n, models[n], models[n].balance - 10000, ollama)).join('');
-            selectedBasketEl.innerHTML = basketSelected.map(n => chipHtml(n, models[n], models[n].balance - 10000, ollama)).join('');
+            selectedBtcEl.innerHTML = btcSelected.map((n) => {
+                const m = models[n];
+                const btc = m.desk_state.btc;
+                const view = Object.assign({}, m, { last_signal: btc.last_signal });
+                return chipHtml(n, view, btc.balance - startBalance, ollama);
+            }).join('');
+            selectedBasketEl.innerHTML = basketSelected.map((n) => {
+                const m = models[n];
+                const basket = m.desk_state.basket;
+                const view = Object.assign({}, m, { last_signal: basket.last_signal });
+                return chipHtml(n, view, basket.balance - startBalance, ollama);
+            }).join('');
 
             emptyBtcEl.style.display    = btcSelected.length    ? 'none' : 'block';
             emptyBasketEl.style.display = basketSelected.length ? 'none' : 'block';
@@ -328,12 +345,12 @@
         selectedBtcEl.addEventListener('click', async (e) => {
             const chip = e.target.closest('.chip');
             if (!chip) return;
-            await postAction('/api/deselect', chip.dataset.name);
+            await postAction('/api/deselect', chip.dataset.name, { desk: 'btc' });
         });
         selectedBasketEl.addEventListener('click', async (e) => {
             const chip = e.target.closest('.chip');
             if (!chip) return;
-            await postAction('/api/deselect', chip.dataset.name);
+            await postAction('/api/deselect', chip.dataset.name, { desk: 'basket' });
         });
 
         async function refreshState() {
