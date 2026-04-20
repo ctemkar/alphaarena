@@ -13,6 +13,40 @@ PORT = 8000
 START_BALANCE = 10_000.0
 MAX_LOGS = 60
 TICK_SECONDS = 2.0
+OLLAMA_URL = "http://127.0.0.1:11434"
+
+# Map model name  (as it appears in ARENA_DATA) -> Ollama model tag
+OLLAMA_MODELS: dict[str, str] = {
+    "finance-llama-8b": "martain7r/finance-llama-8b:fp16",
+}
+
+
+def _ollama_signal(ollama_tag: str, price: float, desk: str) -> int:
+    """Query Ollama for a trading signal. Returns +1 LONG, -1 SHORT, 0 HOLD."""
+    asset = "BTC" if desk == "btc" else "BASKET (BTC/ETH/SOL/BNB)"
+    prompt = (
+        f"Current {asset} price: ${price:,.2f}. "
+        "Should a short-term trader go LONG, SHORT, or HOLD right now? "
+        "Reply with exactly one word: LONG, SHORT, or HOLD."
+    )
+    payload = json.dumps({"model": ollama_tag, "prompt": prompt, "stream": False}).encode()
+    req = urllib.request.Request(
+        f"{OLLAMA_URL}/api/generate",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=4.0) as resp:
+            result = json.loads(resp.read().decode())
+            text = result.get("response", "").strip().upper()
+            if "LONG" in text:
+                return 1
+            if "SHORT" in text:
+                return -1
+            return 0
+    except Exception:
+        return 0  # fall back to HOLD on any error
 
 
 def now_ts() -> str:
@@ -53,6 +87,8 @@ class ArenaState:
             "pos": 0.0,
             "entry": 0.0,
             "preview_pnl": 0.0,
+            "signal_source": "sim",   # 'sim' | 'ai'
+            "last_signal": "IDLE",    # LONG | SHORT | HOLD | IDLE
         }
 
     def add_log(self, message: str) -> None:
@@ -120,15 +156,45 @@ class ArenaState:
                 m["balance"] += (ref_price - m["entry"]) * m["pos"]
                 m["entry"] = ref_price
 
-            if m["selected"] and random.random() > 0.94:
-                action = 1 if random.random() < m["bias"] else -1
-                m["pos"] = action * (m["balance"] / max(ref_price, 1.0)) * 0.4
-                m["entry"] = ref_price
-                side = "LONG" if action > 0 else "SHORT"
-                self.add_log(f"{name} [{m['desk'].upper()}]: {side} @ ${ref_price:,.2f}")
+            # Decide whether to make a new trade this tick
+            should_trade = m["selected"] and random.random() > 0.94
+            if should_trade:
+                ollama_tag = OLLAMA_MODELS.get(name)
+                if ollama_tag:
+                    # Real AI signal — run in a fire-and-forget thread so it
+                    # never blocks the main tick loop.
+                    threading.Thread(
+                        target=self._apply_ollama_signal,
+                        args=(name, ollama_tag, ref_price),
+                        daemon=True,
+                    ).start()
+                else:
+                    action = 1 if random.random() < m["bias"] else -1
+                    m["pos"] = action * (m["balance"] / max(ref_price, 1.0)) * 0.4
+                    m["entry"] = ref_price
+                    side = "LONG" if action > 0 else "SHORT"
+                    m["signal_source"] = "sim"
+                    m["last_signal"] = side
+                    self.add_log(f"{name} [{m['desk'].upper()}]: {side} @ ${ref_price:,.2f} [sim]")
 
             m["preview_pnl"] += (random.random() - 0.5) * 18
             m["preview_pnl"] = max(-500.0, min(500.0, m["preview_pnl"]))
+
+    def _apply_ollama_signal(self, name: str, ollama_tag: str, ref_price: float) -> None:
+        """Called in a background thread. Queries Ollama then applies the result."""
+        action = _ollama_signal(ollama_tag, ref_price, self.models[name].get("desk", "btc"))
+        with self.lock:
+            m = self.models.get(name)
+            if not m or not m["selected"]:
+                return
+            if action != 0:
+                m["pos"] = action * (m["balance"] / max(ref_price, 1.0)) * 0.4
+                m["entry"] = ref_price
+            side = "LONG" if action == 1 else ("SHORT" if action == -1 else "HOLD")
+            m["signal_source"] = "ai"
+            m["last_signal"] = side
+            desk = (m.get("desk") or "btc").upper()
+            self.add_log(f"{name} [{desk}]: {side} @ ${ref_price:,.2f} [AI]")
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -142,6 +208,7 @@ class ArenaState:
                 "status": {
                     "feed": "LIVE" if self.live_feed else "SIM",
                     "mode": "PAPER",
+                    "ollama_models": list(OLLAMA_MODELS.keys()),
                 },
                 "desk_equity": {
                     "btc": btc_equity,

@@ -37,6 +37,10 @@
         .chip-pnl-pos { color: #02c076; }
         .chip-pnl-neg { color: #f84960; }
         .chip-pnl-flat { color: #848e9c; }
+        .badge-ai { font-size: 10px; background: #a7f432; color: #0b0e11; border-radius: 4px; padding: 1px 5px; margin-left: 5px; font-weight: 700; vertical-align: middle; }
+        .sig-long  { font-size: 10px; color: #02c076; background: rgba(2,192,118,.15); border-radius: 4px; padding: 1px 5px; margin-left: 4px; font-weight: 700; }
+        .sig-short { font-size: 10px; color: #f84960; background: rgba(248,73,96,.15); border-radius: 4px; padding: 1px 5px; margin-left: 4px; font-weight: 700; }
+        .sig-hold  { font-size: 10px; color: #f0b90b; background: rgba(240,185,11,.15); border-radius: 4px; padding: 1px 5px; margin-left: 4px; font-weight: 700; }
 
         .two-col { display: grid; grid-template-columns: 1fr 360px; gap: 16px; height: 510px; }
         .panel { background: #181a20; border: 1px solid #2b2f36; border-radius: 8px; padding: 16px; display: flex; flex-direction: column; overflow: hidden; }
@@ -212,8 +216,10 @@
 
             availableEl.innerHTML = available.map((name) => {
                 const m = models[name];
+                const aiBadge = (s.status.ollama_models || []).includes(name)
+                    ? '<span class="badge-ai">AI</span>' : '';
                 return '<button class="chip" data-name="' + name + '">'
-                    + '<span class="chip-name" style="color:' + m.color + '">' + name + '</span>'
+                    + '<span class="chip-name" style="color:' + m.color + '">' + name + aiBadge + '</span>'
                     + '<span class="' + pnlClass(m.preview_pnl) + '">' + formatPnl(m.preview_pnl) + '</span>'
                     + '</button>';
             }).join('');
@@ -221,8 +227,14 @@
             selectedBtcEl.innerHTML = btcSelected.map((name) => {
                 const m = models[name];
                 const pnl = m.balance - 10000;
+                const aiBadge = (s.status.ollama_models || []).includes(name)
+                    ? '<span class="badge-ai">AI</span>' : '';
+                const sigClass = m.last_signal === 'LONG' ? 'sig-long'
+                    : m.last_signal === 'SHORT' ? 'sig-short' : 'sig-hold';
+                const sigLabel = m.last_signal && m.last_signal !== 'IDLE'
+                    ? '<span class="' + sigClass + '">' + m.last_signal + '</span>' : '';
                 return '<button class="chip" data-name="' + name + '">'
-                    + '<span class="chip-name" style="color:' + m.color + '">' + name + '</span>'
+                    + '<span class="chip-name" style="color:' + m.color + '">' + name + aiBadge + sigLabel + '</span>'
                     + '<span class="' + pnlClass(pnl) + '">' + formatPnl(pnl) + '</span>'
                     + '</button>';
             }).join('');
@@ -230,8 +242,14 @@
             selectedBasketEl.innerHTML = basketSelected.map((name) => {
                 const m = models[name];
                 const pnl = m.balance - 10000;
+                const aiBadge = (s.status.ollama_models || []).includes(name)
+                    ? '<span class="badge-ai">AI</span>' : '';
+                const sigClass = m.last_signal === 'LONG' ? 'sig-long'
+                    : m.last_signal === 'SHORT' ? 'sig-short' : 'sig-hold';
+                const sigLabel = m.last_signal && m.last_signal !== 'IDLE'
+                    ? '<span class="' + sigClass + '">' + m.last_signal + '</span>' : '';
                 return '<button class="chip" data-name="' + name + '">'
-                    + '<span class="chip-name" style="color:' + m.color + '">' + name + '</span>'
+                    + '<span class="chip-name" style="color:' + m.color + '">' + name + aiBadge + sigLabel + '</span>'
                     + '<span class="' + pnlClass(pnl) + '">' + formatPnl(pnl) + '</span>'
                     + '</button>';
             }).join('');
