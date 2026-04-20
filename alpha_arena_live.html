@@ -20,49 +20,13 @@
         .selector-panel h3 { margin: 0 0 10px 0; font-size: 16px; color: #eaecef; }
         .help { color: #848e9c; font-size: 14px; margin-bottom: 8px; }
         .chip-wrap { display: flex; flex-wrap: wrap; gap: 8px; }
-        .chip {
-            border: 1px solid #2b2f36;
-            border-radius: 999px;
-            background: #10151b;
-            color: #eaecef;
-            padding: 7px 11px;
-            font-size: 14px;
-            cursor: pointer;
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-        }
-        .chip:hover { border-color: #f0b90b; }
-        .chip-name { font-weight: 600; }
-        .chip-pnl-pos { color: #02c076; }
-        .chip-pnl-neg { color: #f84960; }
-        .chip-pnl-flat { color: #848e9c; }
-        .badge-ai { font-size: 10px; background: #a7f432; color: #0b0e11; border-radius: 4px; padding: 1px 5px; margin-left: 5px; font-weight: 700; vertical-align: middle; }
-        .sig-long  { font-size: 10px; color: #02c076; background: rgba(2,192,118,.15); border-radius: 4px; padding: 1px 5px; margin-left: 4px; font-weight: 700; }
-        .sig-short { font-size: 10px; color: #f84960; background: rgba(248,73,96,.15); border-radius: 4px; padding: 1px 5px; margin-left: 4px; font-weight: 700; }
-        .sig-hold  { font-size: 10px; color: #f0b90b; background: rgba(240,185,11,.15); border-radius: 4px; padding: 1px 5px; margin-left: 4px; font-weight: 700; }
-
-        .two-col { display: grid; grid-template-columns: 1fr 360px; gap: 16px; height: 510px; }
-        .panel { background: #181a20; border: 1px solid #2b2f36; border-radius: 8px; padding: 16px; display: flex; flex-direction: column; overflow: hidden; }
-        .panel h3 { margin: 0 0 10px 0; font-size: 16px; }
-        .chart-grid { display: grid; grid-template-rows: 1fr 1fr; gap: 12px; flex: 1; min-height: 0; }
-        .chart-section { border: 1px solid #2b2f36; border-radius: 8px; padding: 10px; display: flex; flex-direction: column; min-height: 0; }
-        .chart-section h4 { margin: 0 0 8px 0; font-size: 14px; color: #eaecef; }
-        .chart-container { flex: 1; min-height: 0; }
-        .chart-note { margin-top: 8px; color: #848e9c; font-size: 13px; }
-
-        .desk-title { margin: 8px 0 6px 0; font-size: 14px; color: #f0b90b; text-transform: uppercase; letter-spacing: 0.6px; }
-        .empty { color: #848e9c; font-size: 14px; padding: 8px 0; }
-        .trade-log { margin-top: 10px; flex: 1; overflow-y: auto; font-size: 13px; color: #848e9c; border-top: 1px solid #2b2f36; padding-top: 8px; }
-        .trade-log div { padding: 2px 0; }
 
         .badge { font-size: 12px; padding: 3px 9px; border-radius: 12px; margin-left: 8px; }
         .badge-live { background: #02c07622; color: #02c076; }
         .badge-sim { background: #f0b90b22; color: #f0b90b; }
 
         @media (max-width: 980px) {
-            .two-col { grid-template-columns: 1fr; height: auto; }
-            .panel { min-height: 360px; }
+            .desks-grid { grid-template-columns: 1fr; }
         }
     </style>
 </head>
@@ -83,59 +47,66 @@
         <div class="card"><h4>Mode</h4><div id="mode-val" class="val" style="color:#f0b90b;font-size:18px">PAPER</div></div>
     </div>
 
-    <div class="selector-panel">
-        <h3>Available Models</h3>
-        <div class="help">Click a model to select it. Selected models move below into BTC-Only or Basket desk. Click selected models to deselect.</div>
-        <div id="available-models" class="chip-wrap"></div>
-    </div>
+    <div class="desks-grid">
 
-    <div class="two-col">
-        <div class="panel">
-            <h3>Desk Performance (USD)</h3>
-            <div class="chart-grid">
-                <div class="chart-section">
-                    <h4>BTC-Only Desk</h4>
-                    <div class="chart-container">
-                        <canvas id="btcChart"></canvas>
-                    </div>
-                </div>
-                <div class="chart-section">
-                    <h4>Basket Desk</h4>
-                    <div class="chart-container">
-                        <canvas id="basketChart"></canvas>
-                    </div>
+        <!-- BTC-Only Desk -->
+        <div class="desk-section">
+            <div class="desk-header">
+                <h2 style="margin:0;color:#f0b90b">₿ BTC-Only Desk</h2>
+                <div style="text-align:right">
+                    <div id="btc-price" class="desk-price">--</div>
+                    <div id="btc-desk-pnl" class="desk-pnl-badge" style="color:#02c076">+$0.00</div>
                 </div>
             </div>
-            <div class="chart-note">Server-side paper executor updates every 2 seconds from live BTC ticker with simulated basket legs.</div>
-        </div>
-
-        <div class="panel">
-            <h3>Selected Models</h3>
-            <div class="desk-title">BTC-Only Desk</div>
+            <div class="section-label">Available Models — click to add to this desk</div>
+            <div id="available-btc" class="chip-wrap"></div>
+            <hr class="divider">
+            <div class="section-label">Active on Desk — click to remove</div>
             <div id="selected-btc" class="chip-wrap"></div>
-            <div id="empty-btc" class="empty">No selected models</div>
-
-            <div class="desk-title">Basket Desk</div>
-            <div id="selected-basket" class="chip-wrap"></div>
-            <div id="empty-basket" class="empty">No selected models</div>
-
-            <div class="trade-log" id="trade-log"></div>
+            <div id="empty-btc" class="empty">No models on this desk</div>
+            <div class="chart-box"><canvas id="btcChart"></canvas></div>
+            <div class="trade-log" id="log-btc"></div>
         </div>
+
+        <!-- Basket Desk -->
+        <div class="desk-section">
+            <div class="desk-header">
+                <h2 style="margin:0;color:#00ccff">⬡ Basket Desk</h2>
+                <div style="text-align:right">
+                    <div id="basket-price" class="desk-price">--</div>
+                    <div id="basket-desk-pnl" class="desk-pnl-badge" style="color:#02c076">+$0.00</div>
+                </div>
+            </div>
+            <div class="section-label">Available Models — click to add to this desk</div>
+            <div id="available-basket" class="chip-wrap"></div>
+            <hr class="divider">
+            <div class="section-label">Active on Desk — click to remove</div>
+            <div id="selected-basket" class="chip-wrap"></div>
+            <div id="empty-basket" class="empty">No models on this desk</div>
+            <div class="chart-box"><canvas id="basketChart"></canvas></div>
+            <div class="trade-log" id="log-basket"></div>
+        </div>
+
     </div>
 
     <script>
-        const btcEl = document.getElementById('btc-price');
-        const pnlEl = document.getElementById('pnl-val');
+        const btcPriceEl   = document.getElementById('btc-price');
+        const btcDeskPnlEl = document.getElementById('btc-desk-pnl');
+        const basketPriceEl   = document.getElementById('basket-price');
+        const basketDeskPnlEl = document.getElementById('basket-desk-pnl');
         const activeModelsEl = document.getElementById('active-models');
-        const modeEl = document.getElementById('mode-val');
-        const feedLbl = document.getElementById('feed-label');
+        const modeEl    = document.getElementById('mode-val');
+        const pnlEl     = document.getElementById('pnl-val');
+        const feedLbl   = document.getElementById('feed-label');
         const feedBadge = document.getElementById('feed-badge');
-        const availableEl = document.getElementById('available-models');
-        const selectedBtcEl = document.getElementById('selected-btc');
+        const availBtcEl    = document.getElementById('available-btc');
+        const availBasketEl = document.getElementById('available-basket');
+        const selectedBtcEl    = document.getElementById('selected-btc');
         const selectedBasketEl = document.getElementById('selected-basket');
-        const emptyBtcEl = document.getElementById('empty-btc');
+        const emptyBtcEl    = document.getElementById('empty-btc');
         const emptyBasketEl = document.getElementById('empty-basket');
-        const logEl = document.getElementById('trade-log');
+        const logBtcEl    = document.getElementById('log-btc');
+        const logBasketEl = document.getElementById('log-basket');
 
         let state = null;
 
