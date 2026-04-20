@@ -105,13 +105,14 @@ class ArenaState:
     def next_desk(self) -> str:
         return "btc" if self.selected_count("btc") <= self.selected_count("basket") else "basket"
 
-    def select_model(self, name: str) -> bool:
+    def select_model(self, name: str, desk: str = "btc") -> bool:
         with self.lock:
             m = self.models.get(name)
             if not m or m["selected"]:
                 return False
+            assigned_desk = desk if desk in ("btc", "basket") else "btc"
             m["selected"] = True
-            m["desk"] = self.next_desk()
+            m["desk"] = assigned_desk
             m["pos"] = 0.0
             m["entry"] = self.prices["btc"] if m["desk"] == "btc" else self.prices["basket"]
             self.add_log(f"{name} selected to {m['desk'].upper()} desk")
@@ -269,7 +270,11 @@ class ArenaHandler(SimpleHTTPRequestHandler):
             self._json(400, {"ok": False, "error": "model is required"})
             return
 
-        ok = self.state.select_model(model) if self.path == "/api/select" else self.state.deselect_model(model)
+        if self.path == "/api/select":
+            desk = data.get("desk", "btc")
+            ok = self.state.select_model(model, desk)
+        else:
+            ok = self.state.deselect_model(model)
         if not ok:
             self._json(409, {"ok": False, "error": "No state change"})
             return
