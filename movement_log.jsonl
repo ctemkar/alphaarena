@@ -10914,3 +10914,5 @@
 {"type":"signal","model":"DeepSeek-R1","desk":"basket","signal":"HOLD","source":"ai","price":58760.25,"ts":"2026-04-21T11:58:45.714206"}
 {"type":"price","btc":83734.09,"eth":4184.49,"sol":169.298,"bnb":628.6502,"basket":58757.34,"feed":"sim","ts":"2026-04-21T11:58:48.024016"}
 {"type":"signal","model":"DeepSeek-R1","desk":"basket","signal":"HOLD","source":"ai","price":58749.83,"ts":"2026-04-21T11:58:48.867480"}
+{"type":"price","btc":83707.88,"eth":4183.51,"sol":169.2608,"bnb":628.266,"basket":58737.37,"feed":"sim","ts":"2026-04-21T11:58:51.169973"}
+{"type":"signal","model":"Qwen-3","desk":"basket","signal":"HOLD","source":"ai","price":58757.34,"ts":"2026-04-21T11:58:52.026426"}
