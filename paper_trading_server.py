@@ -7,6 +7,7 @@ import threading
 import time
 import hmac
 import hashlib
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
@@ -333,7 +334,7 @@ class ArenaState:
             self.halt_reason = f"Daily loss guardrail hit (${self.daily_loss_limit_usd:.2f})"
             self.add_log(f"LIVE TRADING HALTED: {self.halt_reason}")
 
-    def _binance_signed_post(self, path: str, params: dict) -> dict:
+    def _binance_signed_request(self, method: str, path: str, params: dict) -> dict:
         if not BINANCE_API_KEY or not BINANCE_API_SECRET:
             raise RuntimeError("Binance API credentials are missing")
         payload = dict(params)
@@ -341,18 +342,55 @@ class ArenaState:
         payload["recvWindow"] = 5000
         query = urllib.parse.urlencode(payload)
         signature = hmac.new(BINANCE_API_SECRET.encode("utf-8"), query.encode("utf-8"), hashlib.sha256).hexdigest()
-        body = f"{query}&signature={signature}".encode("utf-8")
-        req = urllib.request.Request(
-            f"{BINANCE_BASE_URL}{path}",
-            data=body,
-            headers={
-                "X-MBX-APIKEY": BINANCE_API_KEY,
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=5.0) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        signed_query = f"{query}&signature={signature}"
+        headers = {
+            "X-MBX-APIKEY": BINANCE_API_KEY,
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        if method == "GET":
+            req = urllib.request.Request(
+                f"{BINANCE_BASE_URL}{path}?{signed_query}",
+                headers=headers,
+                method="GET",
+            )
+        else:
+            req = urllib.request.Request(
+                f"{BINANCE_BASE_URL}{path}",
+                data=signed_query.encode("utf-8"),
+                headers=headers,
+                method=method,
+            )
+        try:
+            with urllib.request.urlopen(req, timeout=5.0) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+            try:
+                payload = json.loads(raw)
+                msg = payload.get("msg") or raw
+                code = payload.get("code")
+                detail = f"Binance HTTP {exc.code}"
+                if code is not None:
+                    detail += f" code {code}"
+                raise RuntimeError(f"{detail}: {msg}") from None
+            except json.JSONDecodeError:
+                raise RuntimeError(f"Binance HTTP {exc.code}: {raw}") from None
+
+    def _binance_signed_get(self, path: str, params: dict) -> dict:
+        return self._binance_signed_request("GET", path, params)
+
+    def _binance_signed_post(self, path: str, params: dict) -> dict:
+        return self._binance_signed_request("POST", path, params)
+
+    def _get_spot_free_balance(self, asset: str) -> float:
+        account = self._binance_signed_get("/api/v3/account", {})
+        for row in account.get("balances", []):
+            if row.get("asset") == asset:
+                try:
+                    return float(row.get("free", "0") or 0.0)
+                except (TypeError, ValueError):
+                    return 0.0
+        return 0.0
 
     def _place_live_market_order(self, symbol: str, side: str, quote_usd: float) -> dict:
         qty = max(5.0, min(quote_usd, self.max_order_usd))
@@ -400,6 +438,21 @@ class ArenaState:
             symbols = self._desk_symbols(desk)
             order_usd = self.live_order_usd
 
+        if side_label == "LONG":
+            required_usdt = order_usd * len(symbols)
+            try:
+                free_usdt = self._get_spot_free_balance("USDT")
+            except Exception as exc:
+                with self.lock:
+                    self.add_log(f"{model_name} LIVE precheck failed: {exc}")
+                return
+            if free_usdt + 1e-9 < required_usdt:
+                with self.lock:
+                    self.add_log(
+                        f"{model_name} LIVE LONG skipped (insufficient USDT: need ${required_usdt:.2f}, free ${free_usdt:.2f})"
+                    )
+                return
+
         for symbol in symbols:
             self.live_order_queue.put((model_name, symbol, side_label, order_usd))
         with self.lock:
@@ -410,6 +463,7 @@ class ArenaState:
         base_slot = {
             "selected": False,
             "balance": START_BALANCE,
+            "realized_pnl": 0.0,
             "pos": 0.0,
             "entry": 0.0,
             "preview_pnl": 0.0,
@@ -501,9 +555,8 @@ class ArenaState:
                     continue
                 ref_price = self.prices["btc"] if d == "btc" else self.prices["basket"]
                 self._close_trade_if_open(name, d, slot, "deselect", ref_price)
+                slot["realized_pnl"] += slot["balance"] - START_BALANCE
                 slot["selected"] = False
-                # Clear accumulated state so removed models do not carry P&L
-                # back into totals if they are selected again later.
                 slot["balance"] = START_BALANCE
                 slot["pos"] = 0.0
                 slot["entry"] = 0.0
@@ -618,33 +671,14 @@ class ArenaState:
                             "signal": side,
                             "source": "sim",
                             "price":  round(ref_price, 2),
-                        }
-                        else:
-                            slot["pos"] = action * (slot["balance"] / max(ref_price, 1.0)) * 0.4
-                            slot["entry"] = ref_price
-                            self._roll_trade_on_signal(name, desk, slot, side, ref_price, "signal_flip")
-                            self._execute_live_signal(name, desk, side)
-                        self.add_log(f"{name} [{desk.upper()}]: {side} @ ${ref_price:,.2f} [sim]")
-                        _log_movement({
-                            "type":   "signal",
-                            "model":  name,
-                            "desk":   desk,
-                            "signal": side,
-                            "source": "sim",
-                            "price":  round(ref_price, 2),
                         })
 
                 slot["preview_pnl"] += (random.random() - 0.5) * 18
-            side = "LONG" if action == 1 else ("SHORT" if action == -1 else "HOLD")
-            slot["signal_source"] = "ai"
-            slot["last_signal"] = side
-            if side == "HOLD":
-                # HOLD closes the open trade and flattens position.
-                self._close_trade_if_open(name, desk_key, slot, "hold_signal", ref_price)
-                slot["pos"] = 0.0
-            else:
-                slot["pos"] = action * (slot["balance"] / max(ref_price, 1.0)) * 0.4
-                slot["entry"] = ref_price
+
+    def _apply_ollama_signal(self, name: str, desk_key: str, ollama_tag: str, ref_price: float) -> None:
+        action = _ollama_signal(ollama_tag, ref_price, desk_key)
+        live_desk = desk_key
+        live_side = "HOLD"
         with self.lock:
             m = self.models.get(name)
             if not m:
@@ -681,6 +715,16 @@ class ArenaState:
         with self.lock:
             btc_equity = sum(m["desk_state"]["btc"]["balance"] for m in self.models.values() if m["desk_state"]["btc"]["selected"])
             basket_equity = sum(m["desk_state"]["basket"]["balance"] for m in self.models.values() if m["desk_state"]["basket"]["selected"])
+            btc_pnl = sum(
+                m["desk_state"]["btc"].get("realized_pnl", 0.0)
+                + (m["desk_state"]["btc"]["balance"] - START_BALANCE if m["desk_state"]["btc"]["selected"] else 0.0)
+                for m in self.models.values()
+            )
+            basket_pnl = sum(
+                m["desk_state"]["basket"].get("realized_pnl", 0.0)
+                + (m["desk_state"]["basket"]["balance"] - START_BALANCE if m["desk_state"]["basket"]["selected"] else 0.0)
+                for m in self.models.values()
+            )
             return {
                 "prices": {
                     "btc": self.prices["btc"],
@@ -698,6 +742,10 @@ class ArenaState:
                 "desk_equity": {
                     "btc": btc_equity,
                     "basket": basket_equity,
+                },
+                "desk_pnl": {
+                    "btc": btc_pnl,
+                    "basket": basket_pnl,
                 },
                 "models": self.models,
                 "start_balance": START_BALANCE,

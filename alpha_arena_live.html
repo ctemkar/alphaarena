@@ -281,8 +281,8 @@
             if (modeEl)           modeEl.innerText           = s.status.mode;
 
             // Desk prices & PnL
-            const btcPnl    = s.desk_equity.btc    - countSelected(models, 'btc') * startBalance;
-            const basketPnl = s.desk_equity.basket - countSelected(models, 'basket') * startBalance;
+            const btcPnl    = s.desk_pnl ? Number(s.desk_pnl.btc || 0) : (s.desk_equity.btc - countSelected(models, 'btc') * startBalance);
+            const basketPnl = s.desk_pnl ? Number(s.desk_pnl.basket || 0) : (s.desk_equity.basket - countSelected(models, 'basket') * startBalance);
 
             applyPnlText(btcDeskPnlEl, btcPnl);
             if (basketPriceDeskEl) basketPriceDeskEl.innerText = '$' + Number(s.prices.basket).toLocaleString(undefined, { maximumFractionDigits: 2 });
