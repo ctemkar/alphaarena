@@ -22,7 +22,7 @@ PORT = 8000
 START_BALANCE = 10_000.0
 MAX_LOGS = 60
 TICK_SECONDS = 3.0
-HARD_MAX_ORDER_USD = 25.0
+HARD_MAX_ORDER_USD = 5.0
 OLLAMA_URL = "http://127.0.0.1:11434"
 try:
     OLLAMA_REQUEST_TIMEOUT_SECONDS = float(os.getenv("ALPHA_OLLAMA_TIMEOUT_SECONDS", "20"))
@@ -85,13 +85,13 @@ except ValueError:
     ANALYTICS_SLIPPAGE_BPS = 5.0
 
 try:
-    LIVE_ORDER_USD = float(os.getenv("ALPHA_LIVE_ORDER_USD", "50"))
+    LIVE_ORDER_USD = float(os.getenv("ALPHA_LIVE_ORDER_USD", "5"))
 except ValueError:
-    LIVE_ORDER_USD = 50.0
+    LIVE_ORDER_USD = 5.0
 try:
-    MAX_ORDER_USD = float(os.getenv("ALPHA_MAX_ORDER_USD", "50"))
+    MAX_ORDER_USD = float(os.getenv("ALPHA_MAX_ORDER_USD", "5"))
 except ValueError:
-    MAX_ORDER_USD = 50.0
+    MAX_ORDER_USD = 5.0
 try:
     DAILY_LOSS_LIMIT_USD = float(os.getenv("ALPHA_DAILY_LOSS_LIMIT_USD", "100"))
 except ValueError:
@@ -554,14 +554,17 @@ class ArenaState:
         exchange_floor = _FUTURES_MIN_NOTIONAL_USD.get(symbol, 5.0)
         return max(exchange_floor, step_floor, 5.0)
 
+    def _symbol_exchange_min_notional_usd(self, symbol: str) -> float:
+        return max(float(_FUTURES_MIN_NOTIONAL_USD.get(symbol, 5.0)), 5.0)
+
     def _desk_min_notional_usd(self, desk: str) -> float:
         symbols = self._desk_symbols(desk)
-        floors = [self._symbol_min_notional_usd(sym) for sym in symbols]
+        floors = [self._symbol_exchange_min_notional_usd(sym) for sym in symbols]
         return min(floors) if floors else 5.0
 
     def _global_min_notional_usd(self) -> float:
         symbols = {"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"}
-        floors = [self._symbol_min_notional_usd(sym) for sym in symbols]
+        floors = [self._symbol_exchange_min_notional_usd(sym) for sym in symbols]
         return min(floors) if floors else 5.0
 
     def _portfolio_pnl(self) -> float:
@@ -724,12 +727,10 @@ class ArenaState:
             min_needed = self._global_min_notional_usd()
             if usdt_free + 1e-9 < min_needed:
                 with self.lock:
-                    self.live_blocked = True
-                    self.live_blocked_reason = (
-                        f"Insufficient USDT in Futures wallet (free ${usdt_free:.2f}, need >= ${min_needed:.2f}). "
-                        "Deposit USDT to your Binance Futures account."
+                    # Soft warning only: futures orders may still pass with leverage.
+                    self.add_log(
+                        f"LIVE FUNDS WARNING: free ${usdt_free:.2f}, est. min notional floor ~${min_needed:.2f}"
                     )
-                    self.add_log(f"LIVE BLOCKED: {self.live_blocked_reason}")
             elif usdt_free < self.live_order_usd:
                 with self.lock:
                     # Informational only: runtime order sizing will adapt to free USDT.
@@ -865,33 +866,14 @@ class ArenaState:
         if self.live_blocked and "Insufficient USDT" not in self.live_blocked_reason:
             return
 
-        # Futures preflight: check available USDT and adapt order budget to funds.
+        # Futures preflight: read balance for diagnostics only.
         try:
             free_usdt = self._get_futures_usdt_balance()
         except Exception as exc:
             with self.lock:
                 self.add_log(f"{model_name} LIVE precheck failed: {exc}")
             return
-
-        # Global funds block should only apply when no supported symbol can be traded.
-        global_min_needed = self._global_min_notional_usd()
-        if free_usdt + 1e-9 < global_min_needed:
-            with self.lock:
-                if not self.live_blocked:
-                    self.live_blocked = True
-                    self.live_blocked_reason = (
-                        f"Insufficient USDT in Futures wallet (free ${free_usdt:.2f}, need >= ${global_min_needed:.2f})"
-                    )
-                    self.add_log(f"LIVE BLOCKED: {self.live_blocked_reason}")
-            return
-
-        if self.live_blocked and "Insufficient USDT" in self.live_blocked_reason and free_usdt + 1e-9 >= global_min_needed:
-            with self.lock:
-                self.live_blocked = False
-                self.live_blocked_reason = ""
-                self.add_log(f"LIVE UNBLOCKED: Futures USDT now sufficient (${free_usdt:.2f})")
-
-        effective_order_usd = min(total_order_usd, max(free_usdt, 0.0))
+        effective_order_usd = max(total_order_usd, 0.0)
 
         # Interpret ALPHA_LIVE_ORDER_USD as total notional per signal and
         # allocate only across symbols that can satisfy min notional/lot constraints.
@@ -955,16 +937,11 @@ class ArenaState:
                 allocations[symbol] = min(allocations[symbol] + per_symbol_extra, self.max_order_usd)
 
         required_usdt = sum(allocations.values())
-
         if free_usdt + 1e-9 < required_usdt:
             with self.lock:
-                if not self.live_blocked:
-                    self.live_blocked = True
-                    self.live_blocked_reason = (
-                        f"Insufficient USDT in Futures wallet (need ${required_usdt:.2f}, free ${free_usdt:.2f})"
-                    )
-                    self.add_log(f"LIVE BLOCKED: {self.live_blocked_reason}")
-            return
+                self.add_log(
+                    f"LIVE FUNDS WARNING: free ${free_usdt:.2f} below est. notional ${required_usdt:.2f}; sending orders (exchange will enforce margin)"
+                )
 
         for symbol, order_usd in allocations.items():
             self.live_order_queue.put((model_name, symbol, side_label, order_usd))
@@ -986,6 +963,7 @@ class ArenaState:
             "losses": 0,
             "pos": 0.0,
             "entry": 0.0,
+            "mark_price": 0.0,
             "signal_source": "none",  # 'none' | 'ai'
             "last_signal": "IDLE",   # LONG | SHORT | HOLD | IDLE
             "hold_streak": 0,
@@ -1041,6 +1019,31 @@ class ArenaState:
     def recalc_basket(self) -> None:
         p = self.prices
         p["basket"] = (p["btc"] + p["eth"] * 12 + p["sol"] * 300 + p["bnb"] * 80) / 4
+
+    def _mark_to_market_slot(self, model_name: str, desk: str, slot: dict, price: float) -> None:
+        if not slot.get("selected"):
+            return
+        pos = float(slot.get("pos", 0.0) or 0.0)
+        if abs(pos) <= 1e-12:
+            slot["mark_price"] = price
+            return
+        prev = float(slot.get("mark_price", 0.0) or 0.0)
+        if prev <= 0.0:
+            slot["mark_price"] = price
+            return
+        pnl_delta = pos * (price - prev)
+        if abs(pnl_delta) > 1e-12:
+            slot["balance"] = float(slot.get("balance", START_BALANCE)) + pnl_delta
+            _log_movement({
+                "type": "pnl",
+                "model": model_name,
+                "desk": desk,
+                "price": round(price, 2),
+                "pos": round(pos, 8),
+                "pnl_delta": round(pnl_delta, 6),
+                "balance": round(slot["balance"], 6),
+            })
+        slot["mark_price"] = price
 
     def selected_count(self, desk: str) -> int:
         return sum(1 for m in self.models.values() if m["desk_state"][desk]["selected"])
@@ -1215,6 +1218,26 @@ class ArenaState:
             self.add_log(f"{desk.upper()} DESK {state}")
             return True
 
+    def set_auto_select_enabled(self, enabled: bool) -> bool:
+        with self.lock:
+            enabled = bool(enabled)
+            if self.auto_select_enabled == enabled:
+                return False
+            self.auto_select_enabled = enabled
+            state = "ENABLED" if enabled else "DISABLED"
+            self.add_log(f"AUTO-SELECT {state}")
+            return True
+
+    def clear_all_desks(self) -> dict:
+        with self.lock:
+            cleared = {"btc": 0, "basket": 0}
+            for nm in list(self.models.keys()):
+                for desk in ("btc", "basket"):
+                    if self.models[nm]["desk_state"][desk]["selected"]:
+                        if self._deselect_model_unlocked(nm, desk):
+                            cleared[desk] += 1
+            return cleared
+
     def refresh_prices(self) -> None:
         prev_prices = self.prices.copy()
         try:
@@ -1278,6 +1301,9 @@ class ArenaState:
                 slot = m["desk_state"][desk]
                 ref_price = self.prices["basket"] if desk == "basket" else self.prices["btc"]
 
+                # Keep desk balances current with open-position price movement.
+                self._mark_to_market_slot(name, desk, slot, ref_price)
+
                 # Trade cadence adapts to movement regime (normal vs aggressive).
                 should_trade = slot["selected"] and random.random() < self._signal_chance(desk)
                 if should_trade:
@@ -1317,11 +1343,13 @@ class ArenaState:
                 # HOLD closes the open trade and flattens position.
                 self._close_trade_if_open(name, desk_key, slot, "hold_signal", ref_price)
                 slot["pos"] = 0.0
+                slot["mark_price"] = ref_price
             else:
                 slot["hold_streak"] = 0
                 slot["directional_signals"] = int(slot.get("directional_signals", 0)) + 1
                 slot["pos"] = action * (slot["balance"] / max(ref_price, 1.0)) * self._position_scale(desk_key)
                 slot["entry"] = ref_price
+                slot["mark_price"] = ref_price
                 self._roll_trade_on_signal(name, desk_key, slot, side, ref_price, "signal_flip")
             desk = desk_key.upper()
             live_side = side
@@ -1352,11 +1380,6 @@ class ArenaState:
                 + (m["desk_state"]["basket"]["balance"] - START_BALANCE if m["desk_state"]["basket"]["selected"] else 0.0)
                 for m in self.models.values()
             )
-            if strict_live_mode:
-                # In strict no-simulation live mode, hide internal desk/model PnL
-                # to keep all displayed performance tied to Binance account equity.
-                btc_pnl = 0.0
-                basket_pnl = 0.0
             app_total_pnl = btc_pnl + basket_pnl
             if self.strict_no_simulation and self.binance_pnl.get("available"):
                 app_total_pnl = float(self.binance_pnl.get("equity_delta_usd", 0.0) or 0.0)
@@ -1372,13 +1395,13 @@ class ArenaState:
                     total_r += r
                 model_stats[nm] = {
                     "color": mm["color"],
-                    "total_pnl": 0.0 if strict_live_mode else round(total_r, 4),
-                    "btc_pnl": 0.0 if strict_live_mode else round(
+                    "total_pnl": round(total_r, 4),
+                    "btc_pnl": round(
                         mm["desk_state"]["btc"].get("realized_pnl", 0.0)
                         + (mm["desk_state"]["btc"]["balance"] - START_BALANCE if mm["desk_state"]["btc"]["selected"] else 0.0),
                         4,
                     ),
-                    "basket_pnl": 0.0 if strict_live_mode else round(
+                    "basket_pnl": round(
                         mm["desk_state"]["basket"].get("realized_pnl", 0.0)
                         + (mm["desk_state"]["basket"]["balance"] - START_BALANCE if mm["desk_state"]["basket"]["selected"] else 0.0),
                         4,
@@ -1482,7 +1505,15 @@ class ArenaHandler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self) -> None:
-        if self.path not in {"/api/select", "/api/deselect", "/api/pause", "/api/store/backup", "/api/store/purge"}:
+        if self.path not in {
+            "/api/select",
+            "/api/deselect",
+            "/api/pause",
+            "/api/store/backup",
+            "/api/store/purge",
+            "/api/auto-select",
+            "/api/desks/clear",
+        }:
             self._json(404, {"ok": False, "error": "Not found"})
             return
 
@@ -1521,6 +1552,20 @@ class ArenaHandler(SimpleHTTPRequestHandler):
                 self._json(409, {"ok": False, "error": "No state change"})
                 return
             self._json(200, {"ok": True})
+            return
+
+        if self.path == "/api/auto-select":
+            enabled_raw = data.get("enabled")
+            if not isinstance(enabled_raw, bool):
+                self._json(400, {"ok": False, "error": "enabled must be boolean"})
+                return
+            changed = self.state.set_auto_select_enabled(enabled_raw)
+            self._json(200, {"ok": True, "changed": changed, "enabled": bool(enabled_raw)})
+            return
+
+        if self.path == "/api/desks/clear":
+            cleared = self.state.clear_all_desks()
+            self._json(200, {"ok": True, "cleared": cleared})
             return
 
         model = data.get("model", "")

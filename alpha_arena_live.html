@@ -123,10 +123,12 @@
     </div>
 
     <div id="live-blocked-banner">
-        &#x26A0; LIVE TRADING BLOCKED<span id="live-blocked-reason"></span>
+        &#x26A0; ORDERS BLOCKED (SIGNALS STILL RUNNING)<span id="live-blocked-reason"></span>
     </div>
 
     <div class="control-row">
+        <button id="auto-select-btn" class="pause-btn">Disable Auto-Select</button>
+        <button id="clear-desks-btn" class="pause-btn">Clear All Models</button>
         <button id="pause-all-btn" class="pause-btn">Pause Both Desks</button>
         <button id="pause-btc-btn" class="pause-btn">Pause BTC Desk</button>
         <button id="pause-basket-btn" class="pause-btn">Pause Basket Desk</button>
@@ -249,6 +251,8 @@
         const liveBlockedBanner = document.getElementById('live-blocked-banner');
         const liveBlockedReason = document.getElementById('live-blocked-reason');
         const llmReportBody   = document.getElementById('llm-report-body');
+        const autoSelectBtn   = document.getElementById('auto-select-btn');
+        const clearDesksBtn   = document.getElementById('clear-desks-btn');
         const pauseAllBtn     = document.getElementById('pause-all-btn');
         const pauseBtcBtn     = document.getElementById('pause-btc-btn');
         const pauseBasketBtn  = document.getElementById('pause-basket-btn');
@@ -463,9 +467,14 @@
 
         function renderPauseButtons(s) {
             const st = s.status || {};
+            const autoSelectEnabled = !!st.auto_select_enabled;
             const allPaused = !!st.pause_all_desks;
             const btcPaused = !!st.pause_btc;
             const basketPaused = !!st.pause_basket;
+            if (autoSelectBtn) {
+                autoSelectBtn.innerText = autoSelectEnabled ? 'Disable Auto-Select' : 'Enable Auto-Select';
+                autoSelectBtn.classList.toggle('paused', !autoSelectEnabled);
+            }
             if (pauseAllBtn) {
                 pauseAllBtn.innerText = allPaused ? 'Resume Both Desks' : 'Pause Both Desks';
                 pauseAllBtn.classList.toggle('paused', allPaused);
@@ -553,8 +562,8 @@
             if (modeEl)           modeEl.innerText           = s.status.mode;
 
             // Dynamic page title and header label
-            const isLive = s.status.mode === 'LIVE';
-            const modeWord = isLive ? 'Live Trading' : 'Live Trading (blocked)';
+            const isLive = s.status.mode === 'LIVE' && !s.status.live_blocked;
+            const modeWord = isLive ? 'Live Trading' : 'Live Signals (orders blocked)';
             document.title = 'Alpha Arena | ' + modeWord;
             if (modeLabelEl) { modeLabelEl.innerText = modeWord; modeLabelEl.style.color = isLive ? '#02c076' : '#f0b90b'; }
 
@@ -563,23 +572,9 @@
             const basketPnl = s.desk_pnl ? Number(s.desk_pnl.basket || 0) : (s.desk_equity.basket - countSelected(models, 'basket') * startBalance);
             const strictLive = !!(s.status && s.status.no_simulation && s.status.mode === 'LIVE');
 
-            if (strictLive) {
-                if (btcDeskPnlEl) {
-                    btcDeskPnlEl.innerText = 'N/A (Binance-only)';
-                    btcDeskPnlEl.style.color = '#848e9c';
-                }
-            } else {
-                applyPnlText(btcDeskPnlEl, btcPnl);
-            }
+            applyPnlText(btcDeskPnlEl, btcPnl);
             if (basketPriceDeskEl) basketPriceDeskEl.innerText = '$' + Number(s.prices.basket).toLocaleString(undefined, { maximumFractionDigits: 2 });
-            if (strictLive) {
-                if (basketDeskPnlEl) {
-                    basketDeskPnlEl.innerText = 'N/A (Binance-only)';
-                    basketDeskPnlEl.style.color = '#848e9c';
-                }
-            } else {
-                applyPnlText(basketDeskPnlEl, basketPnl);
-            }
+            applyPnlText(basketDeskPnlEl, basketPnl);
 
             // Split models into groups
             const btcSelected    = names.filter(n => models[n].desk_state && models[n].desk_state.btc && models[n].desk_state.btc.selected);
@@ -676,6 +671,26 @@
             await refreshState();
         }
 
+        async function setAutoSelect(enabled) {
+            await fetch('/api/auto-select', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: !!enabled })
+            });
+            await refreshState();
+        }
+
+        async function clearAllDesks() {
+            const ok = confirm('Remove all selected models from both desks now?');
+            if (!ok) return;
+            await fetch('/api/desks/clear', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+            await refreshState();
+        }
+
         async function backupStores() {
             const r = await fetch('/api/store/backup', {
                 method: 'POST',
@@ -737,6 +752,12 @@
             if (!chip) return;
             await postAction('/api/deselect', chip.dataset.name, { desk: 'basket' });
         });
+
+        autoSelectBtn.addEventListener('click', async () => {
+            const st = (state && state.status) ? state.status : {};
+            await setAutoSelect(!st.auto_select_enabled);
+        });
+        clearDesksBtn.addEventListener('click', clearAllDesks);
 
         pauseAllBtn.addEventListener('click', async () => {
             const st = (state && state.status) ? state.status : {};
