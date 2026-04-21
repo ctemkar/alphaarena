@@ -171,6 +171,8 @@ class ArenaState:
         self.daily_loss_limit_usd = max(10.0, DAILY_LOSS_LIMIT_USD)
         self.kill_switch = False
         self.halt_reason = ""
+        self.live_blocked = False       # True once a 401/403 from Binance is seen
+        self.live_blocked_reason = ""  # human-readable reason
         self.guardrail_day = datetime.utcnow().strftime("%Y-%m-%d")
         self.live_order_queue: queue.Queue[tuple[str, str, str, float]] = queue.Queue()
         self.summary_path = Path("daily_summary.json")
@@ -179,6 +181,7 @@ class ArenaState:
         self.logs = []
         self.recalc_basket()
         if self.live_trading:
+            threading.Thread(target=self._live_order_startup_check, daemon=True).start()
             threading.Thread(target=self._live_order_worker, daemon=True).start()
 
     @staticmethod
@@ -404,6 +407,32 @@ class ArenaState:
             },
         )
 
+    def _live_order_startup_check(self) -> None:
+        """Run once at startup: verify Binance trade permission and sufficient USDT."""
+        time.sleep(2)  # let the price feed settle first
+        try:
+            account = self._binance_signed_get("/api/v3/account", {})
+            if not account.get("canTrade", False):
+                with self.lock:
+                    self.live_blocked = True
+                    self.live_blocked_reason = "Binance account cannot trade (canTrade=False)"
+                    self.add_log(f"LIVE BLOCKED: {self.live_blocked_reason}")
+                return
+            bals = {b["asset"]: float(b.get("free", 0) or 0) for b in account.get("balances", [])}
+            usdt_free = bals.get("USDT", 0.0)
+            if usdt_free < self.live_order_usd:
+                with self.lock:
+                    self.live_blocked = True
+                    self.live_blocked_reason = (
+                        f"Insufficient USDT (free ${usdt_free:.2f}, need ${self.live_order_usd:.2f} min)"
+                    )
+                    self.add_log(f"LIVE BLOCKED: {self.live_blocked_reason}")
+        except Exception as exc:
+            with self.lock:
+                self.live_blocked = True
+                self.live_blocked_reason = f"Binance auth check failed: {exc}"
+                self.add_log(f"LIVE BLOCKED: {self.live_blocked_reason}")
+
     def _live_order_worker(self) -> None:
         """Executes live orders sequentially to avoid parallel request bursts."""
         while True:
@@ -415,8 +444,16 @@ class ArenaState:
                 with self.lock:
                     self.add_log(f"{model_name} LIVE {symbol} {side_label} ${order_usd:.2f} (order {order_id})")
             except Exception as exc:
+                err_str = str(exc)
                 with self.lock:
-                    self.add_log(f"{model_name} LIVE {symbol} {side_label} failed: {exc}")
+                    # Auto-disable live routing on auth errors to stop repeated spam.
+                    if "401" in err_str or "403" in err_str or "auth" in err_str.lower():
+                        if not self.live_blocked:
+                            self.live_blocked = True
+                            self.live_blocked_reason = f"Binance order auth failure: {exc}"
+                            self.add_log(f"LIVE BLOCKED (auto): {self.live_blocked_reason}")
+                    else:
+                        self.add_log(f"{model_name} LIVE {symbol} {side_label} failed: {exc}")
             finally:
                 self.live_order_queue.task_done()
                 # Small delay protects against exchange rate bursts.
@@ -438,6 +475,9 @@ class ArenaState:
             symbols = self._desk_symbols(desk)
             order_usd = self.live_order_usd
 
+        if self.live_blocked:
+            return  # silently skip — already logged once at block time
+
         if side_label == "LONG":
             required_usdt = order_usd * len(symbols)
             try:
@@ -448,9 +488,10 @@ class ArenaState:
                 return
             if free_usdt + 1e-9 < required_usdt:
                 with self.lock:
-                    self.add_log(
-                        f"{model_name} LIVE LONG skipped (insufficient USDT: need ${required_usdt:.2f}, free ${free_usdt:.2f})"
-                    )
+                    if not self.live_blocked:
+                        self.live_blocked = True
+                        self.live_blocked_reason = f"Insufficient USDT (need ${required_usdt:.2f}, free ${free_usdt:.2f})"
+                        self.add_log(f"LIVE BLOCKED: {self.live_blocked_reason}")
                 return
 
         for symbol in symbols:
@@ -725,6 +766,34 @@ class ArenaState:
                 + (m["desk_state"]["basket"]["balance"] - START_BALANCE if m["desk_state"]["basket"]["selected"] else 0.0)
                 for m in self.models.values()
             )
+            # Per-model performance stats aggregated across both desks.
+            model_stats = {}
+            for nm, mm in self.models.items():
+                total_r = 0.0
+                for dk in ("btc", "basket"):
+                    sl = mm["desk_state"][dk]
+                    r = sl.get("realized_pnl", 0.0)
+                    if sl["selected"]:
+                        r += sl["balance"] - START_BALANCE
+                    total_r += r
+                model_stats[nm] = {
+                    "color": mm["color"],
+                    "total_pnl": round(total_r, 4),
+                    "btc_pnl": round(
+                        mm["desk_state"]["btc"].get("realized_pnl", 0.0)
+                        + (mm["desk_state"]["btc"]["balance"] - START_BALANCE if mm["desk_state"]["btc"]["selected"] else 0.0),
+                        4,
+                    ),
+                    "basket_pnl": round(
+                        mm["desk_state"]["basket"].get("realized_pnl", 0.0)
+                        + (mm["desk_state"]["basket"]["balance"] - START_BALANCE if mm["desk_state"]["basket"]["selected"] else 0.0),
+                        4,
+                    ),
+                    "btc_selected":    mm["desk_state"]["btc"]["selected"],
+                    "basket_selected": mm["desk_state"]["basket"]["selected"],
+                    "btc_signal":    mm["desk_state"]["btc"]["last_signal"],
+                    "basket_signal": mm["desk_state"]["basket"]["last_signal"],
+                }
             return {
                 "prices": {
                     "btc": self.prices["btc"],
@@ -735,6 +804,8 @@ class ArenaState:
                     "mode": "LIVE" if self.live_trading else "PAPER",
                     "kill_switch": self.kill_switch,
                     "halt_reason": self.halt_reason,
+                    "live_blocked": self.live_blocked,
+                    "live_blocked_reason": self.live_blocked_reason,
                     "order_usd": self.live_order_usd,
                     "order_queue": self.live_order_queue.qsize(),
                     "ollama_models": list(OLLAMA_MODELS.keys()),
@@ -748,6 +819,7 @@ class ArenaState:
                     "basket": basket_pnl,
                 },
                 "models": self.models,
+                "model_stats": model_stats,
                 "start_balance": START_BALANCE,
                 "daily_summary": self._get_daily_summary(),
                 "logs": self.logs[:],
