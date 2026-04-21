@@ -27,3 +27,5 @@ htmlcov/
 # Runtime output
 *.log
 *.pid
+daily_summary.json
+movement_log.jsonl
