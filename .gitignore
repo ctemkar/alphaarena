@@ -29,3 +29,5 @@ htmlcov/
 *.pid
 daily_summary.json
 movement_log.jsonl
+daily_summary.json
+movement_log.jsonl
