@@ -4,6 +4,7 @@ import json
 import os
 import queue
 import random
+import math
 import threading
 import time
 import hmac
@@ -20,7 +21,12 @@ PORT = 8000
 START_BALANCE = 10_000.0
 MAX_LOGS = 60
 TICK_SECONDS = 3.0
+HARD_MAX_ORDER_USD = 25.0
 OLLAMA_URL = "http://127.0.0.1:11434"
+try:
+    OLLAMA_REQUEST_TIMEOUT_SECONDS = float(os.getenv("ALPHA_OLLAMA_TIMEOUT_SECONDS", "20"))
+except ValueError:
+    OLLAMA_REQUEST_TIMEOUT_SECONDS = 20.0
 BINANCE_BASE_URL     = "https://api.binance.com"       # Spot (not used for trading)
 BINANCE_FUTURES_URL  = "https://fapi.binance.com"      # USDT-M Perpetual Futures
 
@@ -30,6 +36,13 @@ _FUTURES_QTY_PRECISION: dict[str, int] = {
     "ETHUSDT": 3,
     "SOLUSDT": 1,
     "BNBUSDT": 2,
+}
+# Exchange notional floors observed for this account/symbol set.
+_FUTURES_MIN_NOTIONAL_USD: dict[str, float] = {
+    "BTCUSDT": 20.0,
+    "ETHUSDT": 20.0,
+    "SOLUSDT": 5.0,
+    "BNBUSDT": 5.0,
 }
 # Symbol → key in self.prices
 _SYMBOL_PRICE_KEY: dict[str, str] = {
@@ -57,8 +70,8 @@ def _load_dotenv(path: str = ".env") -> None:
 
 
 _load_dotenv()
-BINANCE_API_KEY = os.getenv("EXCH_BINANCE_API_KEY", "")
-BINANCE_API_SECRET = os.getenv("EXCH_BINANCE_API_SECRET", "")
+BINANCE_API_KEY = os.getenv("EXCH_BINANCE_API_KEY", "") or os.getenv("BINANCE_KEY", "")
+BINANCE_API_SECRET = os.getenv("EXCH_BINANCE_API_SECRET", "") or os.getenv("BINANCE_SECRET", "")
 LIVE_TRADING_ENABLED = os.getenv("ALPHA_LIVE_TRADING", "0").strip().lower() in {"1", "true", "yes", "on"}
 USE_FUTURES = os.getenv("ALPHA_USE_FUTURES", "1").strip().lower() not in {"0", "false", "no", "off"}
 try:
@@ -82,24 +95,67 @@ try:
     DAILY_LOSS_LIMIT_USD = float(os.getenv("ALPHA_DAILY_LOSS_LIMIT_USD", "100"))
 except ValueError:
     DAILY_LOSS_LIMIT_USD = 100.0
+try:
+    BINANCE_PNL_REFRESH_SECONDS = int(os.getenv("ALPHA_BINANCE_PNL_REFRESH_SECONDS", "10"))
+except ValueError:
+    BINANCE_PNL_REFRESH_SECONDS = 10
 
 try:
     START_BALANCE = float(os.getenv("ALPHA_START_BALANCE_USD", str(START_BALANCE)))
 except ValueError:
     START_BALANCE = 10_000.0
 
+REQUIRE_LIVE_FEED = os.getenv("ALPHA_REQUIRE_LIVE_FEED", "1").strip().lower() in {"1", "true", "yes", "on"}
+STRICT_NO_SIMULATION = os.getenv("ALPHA_NO_SIMULATION", "1").strip().lower() in {"1", "true", "yes", "on"}
+
+AUTO_SELECT_ENABLED = os.getenv("ALPHA_AUTO_SELECT_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+try:
+    AUTO_SELECT_TOP_N = int(os.getenv("ALPHA_AUTO_SELECT_TOP_N", "4"))
+except ValueError:
+    AUTO_SELECT_TOP_N = 4
+try:
+    AUTO_SELECT_INTERVAL_TICKS = int(os.getenv("ALPHA_AUTO_SELECT_INTERVAL_TICKS", "20"))
+except ValueError:
+    AUTO_SELECT_INTERVAL_TICKS = 20
+try:
+    HOLD_REPLACE_STREAK = int(os.getenv("ALPHA_HOLD_REPLACE_STREAK", "2"))
+except ValueError:
+    HOLD_REPLACE_STREAK = 2
+try:
+    HOLD_SCORE_PENALTY = float(os.getenv("ALPHA_HOLD_SCORE_PENALTY", "8.0"))
+except ValueError:
+    HOLD_SCORE_PENALTY = 8.0
+try:
+    BASE_SIGNAL_CHANCE = float(os.getenv("ALPHA_BASE_SIGNAL_CHANCE", "0.12"))
+except ValueError:
+    BASE_SIGNAL_CHANCE = 0.12
+
+AGGRESSIVE_MOVEMENT_ENABLED = os.getenv("ALPHA_AGGRESSIVE_MOVEMENT_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+try:
+    AGGRESSIVE_MOVE_PCT = float(os.getenv("ALPHA_AGGRESSIVE_MOVE_PCT", "0.35"))
+except ValueError:
+    AGGRESSIVE_MOVE_PCT = 0.35
+try:
+    AGGRESSIVE_SIGNAL_MULTIPLIER = float(os.getenv("ALPHA_AGGRESSIVE_SIGNAL_MULTIPLIER", "1.7"))
+except ValueError:
+    AGGRESSIVE_SIGNAL_MULTIPLIER = 1.7
+try:
+    AGGRESSIVE_POSITION_MULTIPLIER = float(os.getenv("ALPHA_AGGRESSIVE_POSITION_MULTIPLIER", "1.35"))
+except ValueError:
+    AGGRESSIVE_POSITION_MULTIPLIER = 1.35
+
 # Map model name  (as it appears in ARENA_DATA) -> Ollama model tag
 OLLAMA_MODELS: dict[str, str] = {
-    "Qwen-3":          "qwen3.5:latest",
-    "Qwen-2.5-Coder":  "qwen2.5-coder:7b",
-    "Qwen3-Coder":     "qwen3-coder:latest",
+    "Qwen-3":          "qwen2.5-coder:latest",
+    "Qwen-2.5-Coder":  "qwen2.5-coder:latest",
+    "Qwen3-Coder":     "qwen2.5-coder:latest",
     "DeepSeek-R1":     "deepseek-r1:8b",
     "Gemma-4":         "gemma4:latest",
-    "Phi-3":           "phi3:latest",
-    "Llama-4":         "llama3:latest",
-    "Llama-3.2":       "llama3.2:3b",
+    "Phi-3":           "mistral:latest",
+    "Llama-4":         "llama3.1:latest",
+    "Llama-3.2":       "llama3.1:latest",
     "Mistral":         "mistral:latest",
-    "finance-llama-8b":"martain7r/finance-llama-8b:fp16",
+    "finance-llama-8b":"llama3.1:latest",
 }
 
 
@@ -150,7 +206,7 @@ def _ollama_signal(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=8.0) as resp:
+        with urllib.request.urlopen(req, timeout=OLLAMA_REQUEST_TIMEOUT_SECONDS) as resp:
             result = json.loads(resp.read().decode())
             text = result.get("response", "").strip().upper()
             if "LONG" in text:
@@ -220,23 +276,59 @@ class ArenaState:
         self.price_history: collections.deque[dict] = collections.deque(maxlen=20)
         self.live_feed = False
         self.live_trading = bool(LIVE_TRADING_ENABLED and BINANCE_API_KEY and BINANCE_API_SECRET)
-        self.live_order_usd = max(5.0, min(LIVE_ORDER_USD, MAX_ORDER_USD))
-        self.max_order_usd = max(5.0, MAX_ORDER_USD)
+        self.live_order_usd = max(5.0, min(LIVE_ORDER_USD, MAX_ORDER_USD, HARD_MAX_ORDER_USD))
+        self.max_order_usd = max(5.0, min(MAX_ORDER_USD, HARD_MAX_ORDER_USD))
         self.daily_loss_limit_usd = max(10.0, DAILY_LOSS_LIMIT_USD)
+        self.require_live_feed = REQUIRE_LIVE_FEED
+        self.strict_no_simulation = STRICT_NO_SIMULATION
+        self.feed_paused = False
+        self.feed_pause_reason = ""
+        self.pause_all_desks = False
+        self.paused_desks = {"btc": False, "basket": False}
+        self.feed_error = ""
         self.kill_switch = False
         self.halt_reason = ""
         self.live_blocked = False       # True once a 401/403 from Binance is seen
         self.live_blocked_reason = ""  # human-readable reason
         self.guardrail_day = datetime.utcnow().strftime("%Y-%m-%d")
         self.live_order_queue: queue.Queue[tuple[str, str, str, float]] = queue.Queue()
+        self.binance_pnl_refresh_seconds = max(5, BINANCE_PNL_REFRESH_SECONDS)
+        self.binance_pnl_last_refresh = 0.0
+        self.binance_margin_baseline: float | None = None
+        self.binance_pnl = {
+            "available": False,
+            "equity_delta_usd": 0.0,
+            "unrealized_usd": 0.0,
+            "wallet_balance_usd": 0.0,
+            "margin_balance_usd": 0.0,
+            "updated_at": "",
+            "error": "",
+        }
         self.summary_path = Path("daily_summary.json")
         self._summary_cache_stamp: tuple[str, int, int] | None = None
         self._summary_cache = self._default_daily_summary(datetime.now().strftime("%Y-%m-%d"))
+        self.tick_count = 0
+        self.auto_select_enabled = AUTO_SELECT_ENABLED
+        self.auto_select_top_n = max(1, AUTO_SELECT_TOP_N)
+        self.auto_select_interval_ticks = max(5, AUTO_SELECT_INTERVAL_TICKS)
+        self.hold_replace_streak = max(2, HOLD_REPLACE_STREAK)
+        self.hold_score_penalty = max(0.0, HOLD_SCORE_PENALTY)
+        self.base_signal_chance = min(max(BASE_SIGNAL_CHANCE, 0.01), 0.95)
+        self.aggressive_movement_enabled = AGGRESSIVE_MOVEMENT_ENABLED
+        self.aggressive_move_pct = max(0.05, AGGRESSIVE_MOVE_PCT)
+        self.aggressive_signal_multiplier = min(max(AGGRESSIVE_SIGNAL_MULTIPLIER, 1.0), 3.0)
+        self.aggressive_position_multiplier = min(max(AGGRESSIVE_POSITION_MULTIPLIER, 1.0), 2.0)
         self.logs = []
+        self.server_started_at = datetime.now().isoformat()
+        # Queue for sequential Ollama signal generation (no concurrent inference)
+        self.ollama_signal_queue: queue.Queue[tuple[str, str, str, float]] = queue.Queue()
+        self.ollama_signal_pending: set[tuple[str, str]] = set()
         self.recalc_basket()
         if self.live_trading:
             threading.Thread(target=self._live_order_startup_check, daemon=True).start()
             threading.Thread(target=self._live_order_worker, daemon=True).start()
+        # Always start Ollama signal worker for sequential inference
+        threading.Thread(target=self._ollama_signal_worker, daemon=True).start()
 
     @staticmethod
     def _default_daily_summary(day: str) -> dict:
@@ -451,6 +543,52 @@ class ArenaState:
                     return 0.0
         return 0.0
 
+    def _refresh_binance_pnl_if_due(self) -> None:
+        now_mono = time.monotonic()
+        if now_mono - self.binance_pnl_last_refresh < float(self.binance_pnl_refresh_seconds):
+            return
+        self.binance_pnl_last_refresh = now_mono
+
+        if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+            self.binance_pnl = {
+                "available": False,
+                "equity_delta_usd": 0.0,
+                "unrealized_usd": 0.0,
+                "wallet_balance_usd": 0.0,
+                "margin_balance_usd": 0.0,
+                "updated_at": now_ts(),
+                "error": "Binance credentials missing",
+            }
+            return
+
+        try:
+            account = self._binance_signed_get("/fapi/v2/account", {}, futures=True)
+            margin_balance = float(account.get("totalMarginBalance", "0") or 0.0)
+            wallet_balance = float(account.get("totalWalletBalance", "0") or 0.0)
+            unrealized = float(account.get("totalUnrealizedProfit", "0") or 0.0)
+            if self.binance_margin_baseline is None:
+                self.binance_margin_baseline = margin_balance
+            equity_delta = margin_balance - float(self.binance_margin_baseline)
+            self.binance_pnl = {
+                "available": True,
+                "equity_delta_usd": equity_delta,
+                "unrealized_usd": unrealized,
+                "wallet_balance_usd": wallet_balance,
+                "margin_balance_usd": margin_balance,
+                "updated_at": now_ts(),
+                "error": "",
+            }
+        except Exception as exc:
+            self.binance_pnl = {
+                "available": False,
+                "equity_delta_usd": 0.0,
+                "unrealized_usd": 0.0,
+                "wallet_balance_usd": 0.0,
+                "margin_balance_usd": 0.0,
+                "updated_at": now_ts(),
+                "error": str(exc)[:140],
+            }
+
     def _place_live_market_order(self, symbol: str, side: str, quote_usd: float) -> dict:
         """Place a USDT-M Futures market order. side='BUY'=long, 'SELL'=short."""
         order_usd = max(5.0, min(quote_usd, self.max_order_usd))
@@ -458,9 +596,14 @@ class ArenaState:
         price = self.prices.get(price_key, 1.0)
         precision = _FUTURES_QTY_PRECISION.get(symbol, 3)
         raw_qty = order_usd / price
-        qty = round(raw_qty, precision)
+        factor = 10 ** precision
+        qty = math.floor(raw_qty * factor) / factor
         if qty <= 0:
-            raise RuntimeError(f"Calculated quantity {qty} for {symbol} is too small (price=${price:.2f}, order=${order_usd:.2f})")
+            min_notional_for_step = price / factor
+            raise RuntimeError(
+                f"Calculated quantity {qty} for {symbol} is too small "
+                f"(price=${price:.2f}, order=${order_usd:.2f}, min_step_notional~${min_notional_for_step:.2f})"
+            )
         return self._binance_signed_post(
             "/fapi/v1/order",
             {
@@ -477,14 +620,20 @@ class ArenaState:
         time.sleep(2)  # let the price feed settle first
         try:
             usdt_free = self._get_futures_usdt_balance()
-            if usdt_free < self.live_order_usd:
+            if usdt_free < 5.0:
                 with self.lock:
                     self.live_blocked = True
                     self.live_blocked_reason = (
-                        f"Insufficient USDT in Futures wallet (free ${usdt_free:.2f}, "
-                        f"need ${self.live_order_usd:.2f}). Deposit USDT to your Binance Futures account."
+                        f"Insufficient USDT in Futures wallet (free ${usdt_free:.2f}, need >= $5.00). "
+                        "Deposit USDT to your Binance Futures account."
                     )
                     self.add_log(f"LIVE BLOCKED: {self.live_blocked_reason}")
+            elif usdt_free < self.live_order_usd:
+                with self.lock:
+                    # Informational only: runtime order sizing will adapt to free USDT.
+                    self.add_log(
+                        f"LIVE READY (auto-sized): free ${usdt_free:.2f} below configured order ${self.live_order_usd:.2f}"
+                    )
             else:
                 with self.lock:
                     self.add_log(f"\u2713 LIVE FUTURES READY (USDT available: ${usdt_free:.2f})")
@@ -520,29 +669,158 @@ class ArenaState:
                 # Small delay protects against exchange rate bursts.
                 time.sleep(0.2)
 
+    def _ollama_signal_worker(self) -> None:
+        """Processes Ollama signal requests sequentially to avoid concurrent inference overload."""
+        while True:
+            name, desk_key, ollama_tag, ref_price = self.ollama_signal_queue.get()
+            pending_key = (name, desk_key)
+            try:
+                history = list(self.price_history)  # snapshot outside lock
+                action, err = _ollama_signal(ollama_tag, ref_price, desk_key, history)
+                if err:
+                    with self.lock:
+                        self.add_log(f"{name} [{desk_key.upper()}]: LLM error — {err} (treated as HOLD)")
+
+                # Basket desk can become overly HOLD-heavy because its composite
+                # price moves are smoother. If AI is neutral without an error,
+                # use tiny momentum as a directional tiebreaker.
+                if desk_key == "basket" and action == 0 and not err:
+                    move_pct = self._desk_recent_move_pct("basket")
+                    if abs(move_pct) >= 0.01:
+                        action = 1 if move_pct > 0 else -1
+                
+                live_desk = desk_key
+                live_side = "HOLD"
+                with self.lock:
+                    m = self.models.get(name)
+                    if not m:
+                        continue
+                    slot = m["desk_state"][desk_key]
+                    if not slot["selected"]:
+                        continue
+                    if self.pause_all_desks or self.paused_desks.get(desk_key, False):
+                        self.add_log(f"{name} [{desk_key.upper()}]: signal skipped (desk paused)")
+                        continue
+                    side = "LONG" if action == 1 else ("SHORT" if action == -1 else "HOLD")
+                    hard_live_block = self.live_blocked and "Insufficient USDT" not in self.live_blocked_reason
+                    if self.live_trading and hard_live_block and side in {"LONG", "SHORT"}:
+                        side = "HOLD"
+                    slot["signal_source"] = "ai"
+                    slot["last_signal"] = side
+                    if side == "HOLD":
+                        slot["hold_streak"] = int(slot.get("hold_streak", 0)) + 1
+                        slot["hold_signals"] = int(slot.get("hold_signals", 0)) + 1
+                        # HOLD closes the open trade and flattens position.
+                        self._close_trade_if_open(name, desk_key, slot, "hold_signal", ref_price)
+                        slot["pos"] = 0.0
+                    else:
+                        slot["hold_streak"] = 0
+                        slot["directional_signals"] = int(slot.get("directional_signals", 0)) + 1
+                        slot["pos"] = action * (slot["balance"] / max(ref_price, 1.0)) * self._position_scale(desk_key)
+                        slot["entry"] = ref_price
+                        self._roll_trade_on_signal(name, desk_key, slot, side, ref_price, "signal_flip")
+                    desk = desk_key.upper()
+                    live_side = side
+                    self.add_log(f"{name} [{desk}]: {side} @ ${ref_price:,.2f} [AI]")
+                    _log_movement({
+                        "type":   "signal",
+                        "model":  name,
+                        "desk":   live_desk,
+                        "signal": side,
+                        "source": "ai",
+                        "price":  round(ref_price, 2),
+                    })
+                if live_side in {"LONG", "SHORT"}:
+                    self._execute_live_signal(name, live_desk, live_side)
+            except Exception as exc:
+                with self.lock:
+                    self.add_log(f"Ollama worker error: {exc}")
+            finally:
+                with self.lock:
+                    self.ollama_signal_pending.discard(pending_key)
+                self.ollama_signal_queue.task_done()
+                # Small delay between sequential requests prevents Ollama overload
+                time.sleep(0.1)
+
     def _execute_live_signal(self, model_name: str, desk: str, side_label: str) -> None:
         if side_label not in {"LONG", "SHORT"}:
             return
         with self.lock:
             self._evaluate_guardrails()
+            if self.pause_all_desks or self.paused_desks.get(desk, False):
+                return
             if not self.live_trading:
+                return
+            if self.require_live_feed and not self.live_feed:
                 return
             if self.kill_switch:
                 return
             symbols = self._desk_symbols(desk)
-            order_usd = self.live_order_usd
+            total_order_usd = self.live_order_usd
 
-        if self.live_blocked:
-            return  # silently skip — already logged once at block time
+        # Keep hard blocks for auth errors, but allow automatic recovery from
+        # temporary insufficient-funds blocks once balance is sufficient.
+        if self.live_blocked and "Insufficient USDT" not in self.live_blocked_reason:
+            return
 
-        # Futures preflight: check available USDT balance before queuing orders
-        required_usdt = order_usd * len(symbols)
+        # Futures preflight: check available USDT and adapt order budget to funds.
         try:
             free_usdt = self._get_futures_usdt_balance()
         except Exception as exc:
             with self.lock:
                 self.add_log(f"{model_name} LIVE precheck failed: {exc}")
             return
+
+        effective_order_usd = min(total_order_usd, max(free_usdt, 0.0))
+        if effective_order_usd < 5.0:
+            with self.lock:
+                if not self.live_blocked:
+                    self.live_blocked = True
+                    self.live_blocked_reason = (
+                        f"Insufficient USDT in Futures wallet (need >= $5.00, free ${free_usdt:.2f})"
+                    )
+                    self.add_log(f"LIVE BLOCKED: {self.live_blocked_reason}")
+            return
+
+        # Interpret ALPHA_LIVE_ORDER_USD as total notional per signal and
+        # allocate only across symbols that can satisfy min notional/lot constraints.
+        symbol_floor: dict[str, float] = {}
+        for symbol in symbols:
+            price_key = _SYMBOL_PRICE_KEY.get(symbol, "btc")
+            price = max(float(self.prices.get(price_key, 0.0) or 0.0), 1e-9)
+            precision = _FUTURES_QTY_PRECISION.get(symbol, 3)
+            step_floor = price / (10 ** precision)
+            exchange_floor = _FUTURES_MIN_NOTIONAL_USD.get(symbol, 5.0)
+            symbol_floor[symbol] = max(exchange_floor, step_floor, 5.0)
+
+        allocations: dict[str, float] = {}
+        remaining = max(effective_order_usd, 0.0)
+        for symbol, floor in sorted(symbol_floor.items(), key=lambda kv: kv[1]):
+            if floor <= remaining:
+                allocations[symbol] = floor
+                remaining -= floor
+
+        if not allocations:
+            with self.lock:
+                self.add_log(
+                    f"{model_name} LIVE skipped: total ${effective_order_usd:.2f} cannot satisfy any symbol min size "
+                    f"({', '.join(f'{s}~${symbol_floor[s]:.2f}' for s in symbols)})"
+                )
+            return
+
+        if remaining > 0:
+            per_symbol_extra = remaining / len(allocations)
+            for symbol in allocations:
+                allocations[symbol] = min(allocations[symbol] + per_symbol_extra, self.max_order_usd)
+
+        required_usdt = sum(allocations.values())
+
+        if self.live_blocked and "Insufficient USDT" in self.live_blocked_reason and free_usdt + 1e-9 >= required_usdt:
+            with self.lock:
+                self.live_blocked = False
+                self.live_blocked_reason = ""
+                self.add_log(f"LIVE UNBLOCKED: Futures USDT now sufficient (${free_usdt:.2f})")
+
         if free_usdt + 1e-9 < required_usdt:
             with self.lock:
                 if not self.live_blocked:
@@ -553,10 +831,14 @@ class ArenaState:
                     self.add_log(f"LIVE BLOCKED: {self.live_blocked_reason}")
             return
 
-        for symbol in symbols:
+        for symbol, order_usd in allocations.items():
             self.live_order_queue.put((model_name, symbol, side_label, order_usd))
         with self.lock:
-            self.add_log(f"{model_name} queued LIVE {side_label} on {', '.join(symbols)} @ ${order_usd:.2f}")
+            self.add_log(
+                f"{model_name} queued LIVE {side_label} on "
+                f"{', '.join(f'{s}:${allocations[s]:.2f}' for s in allocations)} "
+                f"(total ${required_usdt:.2f})"
+            )
 
     @staticmethod
     def _mk_model(color: str, bias: float) -> dict:
@@ -564,11 +846,17 @@ class ArenaState:
             "selected": False,
             "balance": START_BALANCE,
             "realized_pnl": 0.0,
+            "trades": 0,
+            "wins": 0,
+            "losses": 0,
             "pos": 0.0,
             "entry": 0.0,
             "preview_pnl": 0.0,
-            "signal_source": "sim",  # 'sim' | 'ai'
+            "signal_source": "none",  # 'none' | 'ai'
             "last_signal": "IDLE",   # LONG | SHORT | HOLD | IDLE
+            "hold_streak": 0,
+            "hold_signals": 0,
+            "directional_signals": 0,
             "trade_side": "FLAT",    # FLAT | LONG | SHORT
             "trade_open_balance": START_BALANCE,
         }
@@ -586,6 +874,11 @@ class ArenaState:
         if side not in {"LONG", "SHORT"}:
             return
         trade_pnl = slot["balance"] - slot.get("trade_open_balance", slot["balance"])
+        slot["trades"] = int(slot.get("trades", 0)) + 1
+        if trade_pnl > 0:
+            slot["wins"] = int(slot.get("wins", 0)) + 1
+        elif trade_pnl < 0:
+            slot["losses"] = int(slot.get("losses", 0)) + 1
         _log_movement({
             "type": "trade",
             "model": model_name,
@@ -618,64 +911,184 @@ class ArenaState:
     def selected_count(self, desk: str) -> int:
         return sum(1 for m in self.models.values() if m["desk_state"][desk]["selected"])
 
+    def _desk_recent_move_pct(self, desk: str) -> float:
+        if len(self.price_history) < 2:
+            return 0.0
+        key = "btc" if desk == "btc" else "basket"
+        window = min(8, len(self.price_history))
+        oldest = self.price_history[-window][key]
+        latest = self.price_history[-1][key]
+        if not oldest:
+            return 0.0
+        return ((latest - oldest) / oldest) * 100.0
+
+    def _is_aggressive_movement(self, desk: str) -> bool:
+        if not self.aggressive_movement_enabled:
+            return False
+        return abs(self._desk_recent_move_pct(desk)) >= self.aggressive_move_pct
+
+    def _signal_chance(self, desk: str) -> float:
+        chance = self.base_signal_chance
+        if self._is_aggressive_movement(desk):
+            chance *= self.aggressive_signal_multiplier
+        return min(max(chance, 0.01), 0.95)
+
+    def _position_scale(self, desk: str) -> float:
+        base = 0.4
+        if self._is_aggressive_movement(desk):
+            base *= self.aggressive_position_multiplier
+        return min(max(base, 0.2), 0.85)
+
+    def _model_score(self, name: str, desk: str) -> float:
+        slot = self.models[name]["desk_state"][desk]
+        pnl = float(slot.get("realized_pnl", 0.0))
+        if slot.get("selected"):
+            pnl += float(slot.get("balance", START_BALANCE)) - START_BALANCE
+        wins = int(slot.get("wins", 0))
+        losses = int(slot.get("losses", 0))
+        decisions = wins + losses
+        win_rate = (wins / decisions) if decisions else 0.5
+        trades = int(slot.get("trades", 0))
+        expectancy = pnl / trades if trades else 0.0
+        continuity = 0.2 if slot.get("selected") else 0.0
+        hold_streak = int(slot.get("hold_streak", 0))
+        hold_signals = int(slot.get("hold_signals", 0))
+        directional_signals = int(slot.get("directional_signals", 0))
+        total_signals = hold_signals + directional_signals
+        hold_ratio = (hold_signals / total_signals) if total_signals else 0.5
+        hold_penalty = (hold_ratio * self.hold_score_penalty) + (min(hold_streak, 10) * 0.5)
+        return pnl + ((win_rate - 0.5) * 20.0) + (expectancy * 0.25) + continuity - hold_penalty
+
+    def _select_model_unlocked(self, name: str, desk: str = "btc") -> bool:
+        m = self.models.get(name)
+        if not m:
+            return False
+        assigned_desk = desk if desk in ("btc", "basket") else "btc"
+        slot = m["desk_state"][assigned_desk]
+        if slot["selected"]:
+            return False
+        ref_price = self.prices["btc"] if assigned_desk == "btc" else self.prices["basket"]
+        slot["selected"] = True
+        slot["pos"] = 0.0
+        slot["entry"] = ref_price
+        slot["signal_source"] = "ai"
+        slot["last_signal"] = "HOLD"
+        slot["trade_side"] = "FLAT"
+        self.add_log(f"{name} selected to {assigned_desk.upper()} desk @ ${ref_price:,.2f} (generating first signal)")
+        
+        # Queue first signal for sequential Ollama processing (no concurrent inference)
+        ollama_tag = OLLAMA_MODELS.get(name)
+        pending_key = (name, assigned_desk)
+        if ollama_tag and pending_key not in self.ollama_signal_pending:
+            self.ollama_signal_pending.add(pending_key)
+            self.ollama_signal_queue.put((name, assigned_desk, ollama_tag, ref_price))
+        
+        return True
+
+    def _deselect_model_unlocked(self, name: str, desk: str | None = None) -> bool:
+        m = self.models.get(name)
+        if not m:
+            return False
+        desks = [desk] if desk in ("btc", "basket") else ["btc", "basket"]
+        changed = False
+        for d in desks:
+            slot = m["desk_state"][d]
+            if not slot["selected"]:
+                continue
+            ref_price = self.prices["btc"] if d == "btc" else self.prices["basket"]
+            self._close_trade_if_open(name, d, slot, "deselect", ref_price)
+            slot["realized_pnl"] += slot["balance"] - START_BALANCE
+            slot["selected"] = False
+            slot["balance"] = START_BALANCE
+            slot["pos"] = 0.0
+            slot["entry"] = 0.0
+            slot["signal_source"] = "none"
+            slot["last_signal"] = "IDLE"
+            slot["hold_streak"] = 0
+            slot["hold_signals"] = 0
+            slot["directional_signals"] = 0
+            slot["trade_side"] = "FLAT"
+            slot["trade_open_balance"] = START_BALANCE
+            self.add_log(f"{name} deselected from {d.upper()} desk")
+            changed = True
+        return changed
+
+    def _auto_select_models(self) -> None:
+        if not self.auto_select_enabled:
+            return
+        model_count = len(self.models)
+        if model_count == 0:
+            return
+        top_n = min(max(1, self.auto_select_top_n), model_count)
+        for desk in ("btc", "basket"):
+            forced_rotate: set[str] = set()
+            for nm in self.models.keys():
+                slot = self.models[nm]["desk_state"][desk]
+                if slot.get("selected") and int(slot.get("hold_streak", 0)) >= self.hold_replace_streak:
+                    forced_rotate.add(nm)
+            ranked = sorted(
+                self.models.keys(),
+                key=lambda nm: self._model_score(nm, desk),
+                reverse=True,
+            )
+            ranked_pool = [nm for nm in ranked if nm not in forced_rotate]
+            winners = set(ranked_pool[:top_n])
+            for nm in list(self.models.keys()):
+                selected = self.models[nm]["desk_state"][desk]["selected"]
+                if selected and (nm not in winners or nm in forced_rotate):
+                    if nm in forced_rotate:
+                        self.add_log(
+                            f"AUTO-SELECT {desk.upper()}: rotating out {nm} after HOLD streak {self.models[nm]['desk_state'][desk].get('hold_streak', 0)}"
+                        )
+                    self._deselect_model_unlocked(nm, desk)
+            for nm in ranked_pool:
+                if nm in winners and not self.models[nm]["desk_state"][desk]["selected"]:
+                    self._select_model_unlocked(nm, desk)
+
+            best = ranked[0] if ranked else "-"
+            move_pct = self._desk_recent_move_pct(desk)
+            regime = "AGGRO" if self._is_aggressive_movement(desk) else "NORMAL"
+            self.add_log(
+                f"AUTO-SELECT {desk.upper()}: top {top_n} active | leader={best} | move={move_pct:+.3f}% | {regime}"
+            )
+
     def next_desk(self) -> str:
         return "btc" if self.selected_count("btc") <= self.selected_count("basket") else "basket"
 
     def select_model(self, name: str, desk: str = "btc") -> bool:
         with self.lock:
-            m = self.models.get(name)
-            if not m:
-                return False
-            assigned_desk = desk if desk in ("btc", "basket") else "btc"
-            slot = m["desk_state"][assigned_desk]
-            if slot["selected"]:
-                return False
-            ref_price = self.prices["btc"] if assigned_desk == "btc" else self.prices["basket"]
-            action = 1 if random.random() < m["bias"] else -1
-            slot["selected"] = True
-            # Start with a small initial position so desk P&L moves immediately.
-            slot["pos"] = action * (slot["balance"] / max(ref_price, 1.0)) * 0.3
-            slot["entry"] = ref_price
-            slot["signal_source"] = "sim"
-            slot["last_signal"] = "LONG" if action > 0 else "SHORT"
-            self._roll_trade_on_signal(name, assigned_desk, slot, slot["last_signal"], ref_price, "select")
-            self.add_log(f"{name} selected to {assigned_desk.upper()} desk [{slot['last_signal']}] @ ${ref_price:,.2f}")
-            return True
+            return self._select_model_unlocked(name, desk)
 
     def deselect_model(self, name: str, desk: str | None = None) -> bool:
         with self.lock:
-            m = self.models.get(name)
-            if not m:
+            return self._deselect_model_unlocked(name, desk)
+
+    def set_pause(self, desk: str, paused: bool) -> bool:
+        with self.lock:
+            if desk == "all":
+                if self.pause_all_desks == paused:
+                    return False
+                self.pause_all_desks = paused
+                state = "PAUSED" if paused else "RESUMED"
+                self.add_log(f"DESKS {state}: BTC and BASKET")
+                return True
+            if desk not in ("btc", "basket"):
                 return False
-            desks = [desk] if desk in ("btc", "basket") else ["btc", "basket"]
-            changed = False
-            for d in desks:
-                slot = m["desk_state"][d]
-                if not slot["selected"]:
-                    continue
-                ref_price = self.prices["btc"] if d == "btc" else self.prices["basket"]
-                self._close_trade_if_open(name, d, slot, "deselect", ref_price)
-                slot["realized_pnl"] += slot["balance"] - START_BALANCE
-                slot["selected"] = False
-                slot["balance"] = START_BALANCE
-                slot["pos"] = 0.0
-                slot["entry"] = 0.0
-                slot["signal_source"] = "sim"
-                slot["last_signal"] = "IDLE"
-                slot["trade_side"] = "FLAT"
-                slot["trade_open_balance"] = START_BALANCE
-                self.add_log(f"{name} deselected from {d.upper()} desk")
-                changed = True
-            return changed
+            if self.paused_desks.get(desk, False) == paused:
+                return False
+            self.paused_desks[desk] = paused
+            state = "PAUSED" if paused else "RESUMED"
+            self.add_log(f"{desk.upper()} DESK {state}")
+            return True
 
     def refresh_prices(self) -> None:
         prev_prices = self.prices.copy()
         try:
-            symbols = json.dumps(["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"])
+            symbols = json.dumps(["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"], separators=(",", ":"))
             q = urllib.parse.urlencode({"symbols": symbols})
             req = urllib.request.Request(
                 f"https://api.binance.com/api/v3/ticker/price?{q}",
-                headers={"X-MBX-APIKEY": BINANCE_API_KEY} if BINANCE_API_KEY else {},
+                headers={},
             )
             with urllib.request.urlopen(req, timeout=2.0) as response:
                 payload = json.loads(response.read().decode("utf-8"))
@@ -685,14 +1098,21 @@ class ArenaState:
                 self.prices["sol"] = px.get("SOLUSDT", self.prices["sol"])
                 self.prices["bnb"] = px.get("BNBUSDT", self.prices["bnb"])
                 self.live_feed = all(sym in px for sym in ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"))
-        except Exception:
+                if not self.live_feed:
+                    self.feed_error = "Binance ticker response missing one or more required symbols"
+                if self.live_feed and self.feed_paused:
+                    self.feed_paused = False
+                    self.feed_pause_reason = ""
+                    self.feed_error = ""
+                    self.add_log("LIVE FEED RESTORED: trading resumed")
+        except Exception as exc:
             self.live_feed = False
-            btc_before = prev_prices["btc"]
-            self.prices["btc"] = prev_prices["btc"] * (1 + (random.random() - 0.5) * 0.0015)
-            ret = (self.prices["btc"] - btc_before) / btc_before if btc_before else 0.0
-            self.prices["eth"] = prev_prices["eth"] * (1 + ret * 0.85 + (random.random() - 0.5) * 0.0012)
-            self.prices["sol"] = prev_prices["sol"] * (1 + ret * 1.25 + (random.random() - 0.5) * 0.0025)
-            self.prices["bnb"] = prev_prices["bnb"] * (1 + ret * 0.65 + (random.random() - 0.5) * 0.0010)
+            self.feed_error = str(exc)
+            self.prices = prev_prices
+            if self.require_live_feed and not self.feed_paused:
+                self.feed_paused = True
+                self.feed_pause_reason = "Binance live market data unavailable"
+                self.add_log(f"LIVE FEED LOST: trading paused (no simulation fallback) | cause: {self.feed_error}")
 
         self.recalc_basket()
         # Save to rolling price history (used to enrich LLM prompts)
@@ -711,16 +1131,21 @@ class ArenaState:
             "sol":    round(self.prices["sol"], 4),
             "bnb":    round(self.prices["bnb"], 4),
             "basket": round(self.prices["basket"], 2),
-            "feed":   "live" if self.live_feed else "sim",
+            "feed":   "live" if self.live_feed else "offline",
         })
 
     def step_models(self) -> None:
+        if self.require_live_feed and not self.live_feed:
+            return
         for name, m in self.models.items():
             for desk in ("btc", "basket"):
+                if self.pause_all_desks or self.paused_desks.get(desk, False):
+                    continue
                 slot = m["desk_state"][desk]
                 ref_price = self.prices["basket"] if desk == "basket" else self.prices["btc"]
+                simulate_pnl = (not self.live_trading) or (self.live_trading and not self.live_blocked)
 
-                if slot["selected"] and slot["pos"] != 0:
+                if simulate_pnl and slot["selected"] and slot["pos"] != 0:
                     pnl_delta = (ref_price - slot["entry"]) * slot["pos"]
                     slot["balance"] += pnl_delta
                     slot["entry"] = ref_price
@@ -736,52 +1161,20 @@ class ArenaState:
                             "balance":   round(slot["balance"], 4),
                         })
 
-                # Decide whether to make a new trade this tick (6% chance per tick = ~1 per 50s)
-                should_trade = slot["selected"] and random.random() > 0.88
+                # Trade cadence adapts to movement regime (normal vs aggressive).
+                should_trade = slot["selected"] and random.random() < self._signal_chance(desk)
                 if should_trade:
                     ollama_tag = OLLAMA_MODELS.get(name)
                     if ollama_tag:
-                        # Real AI signal — run in a fire-and-forget thread so it
-                        # never blocks the main tick loop.
-                        threading.Thread(
-                            target=self._apply_ollama_signal,
-                            args=(name, desk, ollama_tag, ref_price),
-                            daemon=True,
-                        ).start()
+                        # Queue only if no request is already pending for this model/desk.
+                        pending_key = (name, desk)
+                        if pending_key not in self.ollama_signal_pending:
+                            self.ollama_signal_pending.add(pending_key)
+                            self.ollama_signal_queue.put((name, desk, ollama_tag, ref_price))
                     else:
-                        # 6% HOLD probability closes the trade and flattens position.
-                        rand = random.random()
-                        if rand > 0.94:
-                            action = 1 if random.random() < m["bias"] else -1
-                            side = "LONG" if action > 0 else "SHORT"
-                        elif rand > 0.88:
-                            action = 0
-                            side = "HOLD"
-                        else:
-                            action = 1 if random.random() < m["bias"] else -1
-                            side = "LONG" if action > 0 else "SHORT"
-                        slot["signal_source"] = "sim"
-                        slot["last_signal"] = side
-                        if side == "HOLD":
-                            # Close any open trade and flatten position.
-                            self._close_trade_if_open(name, desk, slot, "hold_signal", ref_price)
-                            slot["pos"] = 0.0
-                        else:
-                            slot["pos"] = action * (slot["balance"] / max(ref_price, 1.0)) * 0.4
-                            slot["entry"] = ref_price
-                            self._roll_trade_on_signal(name, desk, slot, side, ref_price, "signal_flip")
-                            self._execute_live_signal(name, desk, side)
-                        self.add_log(f"{name} [{desk.upper()}]: {side} @ ${ref_price:,.2f} [sim]")
-                        _log_movement({
-                            "type":   "signal",
-                            "model":  name,
-                            "desk":   desk,
-                            "signal": side,
-                            "source": "sim",
-                            "price":  round(ref_price, 2),
-                        })
+                        self.add_log(f"{name} [{desk.upper()}]: skipped (no mapped Ollama model)")
 
-                slot["preview_pnl"] += (random.random() - 0.5) * 18
+                slot["preview_pnl"] = slot["balance"] - START_BALANCE
 
     def _apply_ollama_signal(self, name: str, desk_key: str, ollama_tag: str, ref_price: float) -> None:
         history = list(self.price_history)  # snapshot outside lock
@@ -798,14 +1191,21 @@ class ArenaState:
             if not slot["selected"]:
                 return
             side = "LONG" if action == 1 else ("SHORT" if action == -1 else "HOLD")
+            hard_live_block = self.live_blocked and "Insufficient USDT" not in self.live_blocked_reason
+            if self.live_trading and hard_live_block and side in {"LONG", "SHORT"}:
+                side = "HOLD"
             slot["signal_source"] = "ai"
             slot["last_signal"] = side
             if side == "HOLD":
+                slot["hold_streak"] = int(slot.get("hold_streak", 0)) + 1
+                slot["hold_signals"] = int(slot.get("hold_signals", 0)) + 1
                 # HOLD closes the open trade and flattens position.
                 self._close_trade_if_open(name, desk_key, slot, "hold_signal", ref_price)
                 slot["pos"] = 0.0
             else:
-                slot["pos"] = action * (slot["balance"] / max(ref_price, 1.0)) * 0.4
+                slot["hold_streak"] = 0
+                slot["directional_signals"] = int(slot.get("directional_signals", 0)) + 1
+                slot["pos"] = action * (slot["balance"] / max(ref_price, 1.0)) * self._position_scale(desk_key)
                 slot["entry"] = ref_price
                 self._roll_trade_on_signal(name, desk_key, slot, side, ref_price, "signal_flip")
             desk = desk_key.upper()
@@ -836,6 +1236,9 @@ class ArenaState:
                 + (m["desk_state"]["basket"]["balance"] - START_BALANCE if m["desk_state"]["basket"]["selected"] else 0.0)
                 for m in self.models.values()
             )
+            app_total_pnl = btc_pnl + basket_pnl
+            if self.strict_no_simulation and self.binance_pnl.get("available"):
+                app_total_pnl = float(self.binance_pnl.get("equity_delta_usd", 0.0) or 0.0)
             # Per-model performance stats aggregated across both desks.
             model_stats = {}
             for nm, mm in self.models.items():
@@ -870,14 +1273,29 @@ class ArenaState:
                     "basket": self.prices["basket"],
                 },
                 "status": {
-                    "feed": "LIVE" if self.live_feed else "SIM",
+                    "feed": "LIVE" if self.live_feed else "OFFLINE",
                     "mode": "LIVE" if self.live_trading else "PAPER",
+                    "no_simulation": self.strict_no_simulation,
+                    "require_live_feed": self.require_live_feed,
+                    "feed_paused": self.feed_paused,
+                    "feed_pause_reason": self.feed_pause_reason,
+                    "feed_error": self.feed_error,
                     "kill_switch": self.kill_switch,
                     "halt_reason": self.halt_reason,
                     "live_blocked": self.live_blocked,
                     "live_blocked_reason": self.live_blocked_reason,
                     "order_usd": self.live_order_usd,
                     "order_queue": self.live_order_queue.qsize(),
+                    "auto_select_enabled": self.auto_select_enabled,
+                    "auto_select_top_n": self.auto_select_top_n,
+                    "auto_select_interval_ticks": self.auto_select_interval_ticks,
+                    "pause_all_desks": self.pause_all_desks,
+                    "pause_btc": self.paused_desks.get("btc", False),
+                    "pause_basket": self.paused_desks.get("basket", False),
+                    "aggressive_movement_enabled": self.aggressive_movement_enabled,
+                    "aggressive_move_pct": self.aggressive_move_pct,
+                    "aggressive_now_btc": self._is_aggressive_movement("btc"),
+                    "aggressive_now_basket": self._is_aggressive_movement("basket"),
                     "ollama_models": list(OLLAMA_MODELS.keys()),
                 },
                 "desk_equity": {
@@ -888,17 +1306,27 @@ class ArenaState:
                     "btc": btc_pnl,
                     "basket": basket_pnl,
                 },
+                "app_total_pnl_usd": app_total_pnl,
                 "models": self.models,
                 "model_stats": model_stats,
                 "start_balance": START_BALANCE,
                 "daily_summary": self._get_daily_summary(),
+                "binance_pnl": self.binance_pnl,
+                "server_started_at": self.server_started_at,
                 "logs": self.logs[:],
                 "ts": now_ts(),
             }
 
     def tick(self) -> None:
         with self.lock:
+            self.tick_count += 1
             self.refresh_prices()
+            self._refresh_binance_pnl_if_due()
+            should_bootstrap_selection = self.selected_count("btc") == 0 and self.selected_count("basket") == 0
+            if self.auto_select_enabled and (
+                should_bootstrap_selection or self.tick_count % self.auto_select_interval_ticks == 0
+            ):
+                self._auto_select_models()
             self.step_models()
 
 
@@ -930,7 +1358,7 @@ class ArenaHandler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self) -> None:
-        if self.path not in {"/api/select", "/api/deselect"}:
+        if self.path not in {"/api/select", "/api/deselect", "/api/pause"}:
             self._json(404, {"ok": False, "error": "Not found"})
             return
 
@@ -939,6 +1367,25 @@ class ArenaHandler(SimpleHTTPRequestHandler):
             data = json.loads(self.rfile.read(content_length).decode("utf-8")) if content_length else {}
         except Exception:
             self._json(400, {"ok": False, "error": "Invalid JSON"})
+            return
+
+        if self.path == "/api/pause":
+            desk = data.get("desk", "")
+            if desk not in {"btc", "basket", "all"}:
+                self._json(400, {"ok": False, "error": "desk must be one of: btc, basket, all"})
+                return
+            paused_raw = data.get("paused")
+            if isinstance(paused_raw, bool):
+                paused = paused_raw
+            elif desk == "all":
+                paused = not self.state.pause_all_desks
+            else:
+                paused = not self.state.paused_desks.get(desk, False)
+            ok = self.state.set_pause(desk, paused)
+            if not ok:
+                self._json(409, {"ok": False, "error": "No state change"})
+                return
+            self._json(200, {"ok": True})
             return
 
         model = data.get("model", "")

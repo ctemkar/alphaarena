@@ -72,6 +72,19 @@
         #live-blocked-banner { display:none; background:#f8496022; border:1px solid #f84960; border-radius:8px; padding:10px 16px; margin-bottom:14px; color:#f84960; font-size:17px; font-weight:500; }
         #live-blocked-banner span { font-weight:400; color:#e8a0a8; margin-left:8px; font-size:16px; }
 
+        .control-row { display:flex; gap:10px; flex-wrap:wrap; margin:0 0 14px; }
+        .pause-btn {
+            border:1px solid #2b2f36;
+            background:#171a21;
+            color:#d9dee6;
+            border-radius:8px;
+            padding:7px 12px;
+            font-size:15px;
+            cursor:pointer;
+        }
+        .pause-btn:hover { border-color:#f0b90b; color:#f0b90b; }
+        .pause-btn.paused { border-color:#f84960; color:#f84960; background:#2a151b; }
+
         /* LLM Performance Report */
         .llm-report { background:#181a20; border:1px solid #2b2f36; border-radius:10px; padding:18px; margin-top:16px; }
         .llm-report h3 { margin:0 0 12px; font-size:18px; font-weight:500; color:#eaecef; }
@@ -110,9 +123,15 @@
         &#x26A0; LIVE TRADING BLOCKED<span id="live-blocked-reason"></span>
     </div>
 
+    <div class="control-row">
+        <button id="pause-all-btn" class="pause-btn">Pause Both Desks</button>
+        <button id="pause-btc-btn" class="pause-btn">Pause BTC Desk</button>
+        <button id="pause-basket-btn" class="pause-btn">Pause Basket Desk</button>
+    </div>
+
     <div class="stats">
         <div class="card"><h4>Live BTC Price</h4><div id="btc-price" class="val">--</div></div>
-        <div class="card"><h4>Total PnL</h4><div id="pnl-val" class="val" style="color:#02c076">+$0.00</div></div>
+        <div class="card"><h4>Total PnL</h4><div id="pnl-val" class="val" style="color:#02c076">+$0.00</div><div id="app-pnl-sub" class="sub">App PnL: +$0.00</div><div id="binance-pnl-sub" class="sub">Binance PnL: loading...</div></div>
         <div class="card"><h4>Selected Models</h4><div id="active-models" class="val">0</div></div>
         <div class="card"><h4>Mode</h4><div id="mode-val" class="val" style="color:#f0b90b;font-size:36px">PAPER</div></div>
         <div class="card"><h4>Daily Analytics</h4><div id="daily-summary" class="sub">Loading...</div></div>
@@ -203,6 +222,8 @@
         const activeModelsEl  = document.getElementById('active-models');
         const modeEl          = document.getElementById('mode-val');
         const pnlEl           = document.getElementById('pnl-val');
+        const appPnlSubEl     = document.getElementById('app-pnl-sub');
+        const binancePnlSubEl = document.getElementById('binance-pnl-sub');
         const dailySummaryEl  = document.getElementById('daily-summary');
         const feedLbl         = document.getElementById('feed-label');
         const feedBadge       = document.getElementById('feed-badge');
@@ -218,8 +239,12 @@
         const liveBlockedBanner = document.getElementById('live-blocked-banner');
         const liveBlockedReason = document.getElementById('live-blocked-reason');
         const llmReportBody   = document.getElementById('llm-report-body');
+        const pauseAllBtn     = document.getElementById('pause-all-btn');
+        const pauseBtcBtn     = document.getElementById('pause-btc-btn');
+        const pauseBasketBtn  = document.getElementById('pause-basket-btn');
 
         let state = null;
+        let lastServerStartedAt = null;
 
         function makeDeskChart(canvasId, label, color) {
             return new Chart(document.getElementById(canvasId).getContext('2d'), {
@@ -267,6 +292,12 @@
             chart.update('none');
         }
 
+        function resetChart(chart) {
+            chart.data.labels = [];
+            chart.data.datasets[0].data = [];
+            chart.update('none');
+        }
+
         function pnlClass(v) { return v > 0 ? 'chip-pnl-pos' : v < 0 ? 'chip-pnl-neg' : 'chip-pnl-flat'; }
         function formatPnl(v) { const n = Number(v.toFixed(2)); return (n >= 0 ? '+' : '') + '$' + n.toLocaleString(); }
         function countSelected(models, desk) {
@@ -276,6 +307,49 @@
             if (!el) return;
             el.innerText = formatPnl(value);
             el.style.color = value > 0 ? '#02c076' : value < 0 ? '#f84960' : '#848e9c';
+        }
+
+        function clockAgeSeconds(hms) {
+            if (!hms || typeof hms !== 'string') return null;
+            const p = hms.split(':').map(Number);
+            if (p.length !== 3 || p.some(Number.isNaN)) return null;
+            const now = new Date();
+            const nowSec = now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
+            const tSec = p[0] * 3600 + p[1] * 60 + p[2];
+            let d = nowSec - tSec;
+            if (d < 0) d += 24 * 3600;
+            return d;
+        }
+
+        function renderBinancePnl(appTotalPnl, binancePnl, appUpdatedAt) {
+            if (appPnlSubEl) {
+                const appTs = appUpdatedAt || '--:--:--';
+                const appAge = clockAgeSeconds(appTs);
+                const appStale = appAge !== null && appAge > 15 ? ' (stale)' : '';
+                appPnlSubEl.innerText = 'App PnL: ' + formatPnl(Number(appTotalPnl || 0)) + ' | Updated: ' + appTs + appStale;
+                appPnlSubEl.style.color = '#b7bdc6';
+            }
+            if (!binancePnlSubEl) return;
+            if (!binancePnl || !binancePnl.available) {
+                const err = (binancePnl && binancePnl.error) ? (' (' + binancePnl.error + ')') : '';
+                binancePnlSubEl.innerText = 'Binance PnL: unavailable' + err;
+                binancePnlSubEl.style.color = '#b7bdc6';
+                return;
+            }
+            const ex = Number(binancePnl.equity_delta_usd || 0);
+            const un = Number(binancePnl.unrealized_usd || 0);
+            const wallet = Number(binancePnl.wallet_balance_usd || 0);
+            const margin = Number(binancePnl.margin_balance_usd || 0);
+            const updated = binancePnl.updated_at || '--:--:--';
+            const binAge = clockAgeSeconds(updated);
+            const binStale = binAge !== null && binAge > 15 ? ' (stale)' : '';
+            binancePnlSubEl.innerText =
+                'Binance PnL Delta: ' + formatPnl(ex)
+                + ' | Unrealized: ' + formatPnl(un)
+                + ' | Wallet: ' + formatPnl(wallet)
+                + ' | Margin: ' + formatPnl(margin)
+                + ' | Updated: ' + updated + binStale;
+            binancePnlSubEl.style.color = '#b7bdc6';
         }
 
         function renderLlmReport(stats, ollamaModels) {
@@ -307,6 +381,25 @@
                     + '<td style="text-align:center">' + (activeDots || '<span style="color:#444">—</span>') + '</td>'
                     + '</tr>';
             }).join('');
+        }
+
+        function renderPauseButtons(s) {
+            const st = s.status || {};
+            const allPaused = !!st.pause_all_desks;
+            const btcPaused = !!st.pause_btc;
+            const basketPaused = !!st.pause_basket;
+            if (pauseAllBtn) {
+                pauseAllBtn.innerText = allPaused ? 'Resume Both Desks' : 'Pause Both Desks';
+                pauseAllBtn.classList.toggle('paused', allPaused);
+            }
+            if (pauseBtcBtn) {
+                pauseBtcBtn.innerText = btcPaused ? 'Resume BTC Desk' : 'Pause BTC Desk';
+                pauseBtcBtn.classList.toggle('paused', btcPaused);
+            }
+            if (pauseBasketBtn) {
+                pauseBasketBtn.innerText = basketPaused ? 'Resume Basket Desk' : 'Pause Basket Desk';
+                pauseBasketBtn.classList.toggle('paused', basketPaused);
+            }
         }
 
         function renderDailySummary(summary) {
@@ -346,6 +439,11 @@
 
         function renderState(s) {
             state = s;
+            if (s.server_started_at && lastServerStartedAt && s.server_started_at !== lastServerStartedAt) {
+                resetChart(btcChart);
+                resetChart(basketChart);
+            }
+            lastServerStartedAt = s.server_started_at || lastServerStartedAt;
             const models = s.models;
             const names  = Object.keys(models);
             const ollama = s.status.ollama_models || [];
@@ -432,8 +530,12 @@
 
             activeModelsEl.innerText = String(btcSelected.length + basketSelected.length);
 
-            const totalPnl = btcPnl + basketPnl;
+            const totalPnl = (typeof s.app_total_pnl_usd === 'number')
+                ? Number(s.app_total_pnl_usd)
+                : (btcPnl + basketPnl);
             applyPnlText(pnlEl, totalPnl);
+            renderBinancePnl(totalPnl, s.binance_pnl || null, s.ts || null);
+            renderPauseButtons(s);
             renderDailySummary(s.daily_summary || null);
             renderLlmReport(s.model_stats || {}, s.status.ollama_models || []);
 
@@ -452,6 +554,15 @@
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(Object.assign({ model }, extra))
+            });
+            await refreshState();
+        }
+
+        async function setPause(desk, paused) {
+            await fetch('/api/pause', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ desk, paused })
             });
             await refreshState();
         }
@@ -482,6 +593,19 @@
             const chip = e.target.closest('.chip');
             if (!chip) return;
             await postAction('/api/deselect', chip.dataset.name, { desk: 'basket' });
+        });
+
+        pauseAllBtn.addEventListener('click', async () => {
+            const st = (state && state.status) ? state.status : {};
+            await setPause('all', !st.pause_all_desks);
+        });
+        pauseBtcBtn.addEventListener('click', async () => {
+            const st = (state && state.status) ? state.status : {};
+            await setPause('btc', !st.pause_btc);
+        });
+        pauseBasketBtn.addEventListener('click', async () => {
+            const st = (state && state.status) ? state.status : {};
+            await setPause('basket', !st.pause_basket);
         });
 
         async function refreshState() {
