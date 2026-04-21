@@ -49,7 +49,7 @@
 
         .badge { font-size: 16px; padding: 3px 8px; border-radius: 10px; margin-left: 8px; font-weight: 400; }
         .badge-live { background: #02c07622; color: #02c076; }
-        .badge-sim  { background: #f0b90b22; color: #f0b90b; }
+        .badge-offline  { background: #f0b90b22; color: #f0b90b; }
 
         /* Two fully independent desk sections — stacked vertically */
         .desks-stack { display: flex; flex-direction: column; gap: 16px; }
@@ -115,7 +115,7 @@
         <div class="live-indicator">
             <span class="dot"></span>
             <span id="feed-label">CONNECTING...</span>
-            <span id="feed-badge" class="badge badge-sim">SIM</span>
+            <span id="feed-badge" class="badge badge-live">LIVE</span>
         </div>
     </div>
 
@@ -127,13 +127,15 @@
         <button id="pause-all-btn" class="pause-btn">Pause Both Desks</button>
         <button id="pause-btc-btn" class="pause-btn">Pause BTC Desk</button>
         <button id="pause-basket-btn" class="pause-btn">Pause Basket Desk</button>
+        <button id="backup-stores-btn" class="pause-btn">Backup Stores</button>
+        <button id="purge-stores-btn" class="pause-btn">Backup + Clear Stores</button>
     </div>
 
     <div class="stats">
         <div class="card"><h4>Live BTC Price</h4><div id="btc-price" class="val">--</div></div>
         <div class="card"><h4>Total PnL</h4><div id="pnl-val" class="val" style="color:#02c076">+$0.00</div><div id="app-pnl-sub" class="sub">App PnL: +$0.00</div><div id="binance-pnl-sub" class="sub">Binance PnL: loading...</div></div>
         <div class="card"><h4>Selected Models</h4><div id="active-models" class="val">0</div></div>
-        <div class="card"><h4>Mode</h4><div id="mode-val" class="val" style="color:#f0b90b;font-size:36px">PAPER</div></div>
+        <div class="card"><h4>Mode</h4><div id="mode-val" class="val" style="color:#02c076;font-size:36px">LIVE</div></div>
         <div class="card"><h4>Daily Analytics</h4><div id="daily-summary" class="sub">Loading...</div></div>
     </div>
 
@@ -242,9 +244,13 @@
         const pauseAllBtn     = document.getElementById('pause-all-btn');
         const pauseBtcBtn     = document.getElementById('pause-btc-btn');
         const pauseBasketBtn  = document.getElementById('pause-basket-btn');
+        const backupStoresBtn = document.getElementById('backup-stores-btn');
+        const purgeStoresBtn  = document.getElementById('purge-stores-btn');
 
         let state = null;
         let lastServerStartedAt = null;
+        let btcChartBasePrice = null;
+        let basketChartBasePrice = null;
 
         function makeDeskChart(canvasId, label, color) {
             return new Chart(document.getElementById(canvasId).getContext('2d'), {
@@ -442,6 +448,8 @@
             if (s.server_started_at && lastServerStartedAt && s.server_started_at !== lastServerStartedAt) {
                 resetChart(btcChart);
                 resetChart(basketChart);
+                btcChartBasePrice = null;
+                basketChartBasePrice = null;
             }
             lastServerStartedAt = s.server_started_at || lastServerStartedAt;
             const models = s.models;
@@ -454,8 +462,8 @@
                 feedLbl.innerText = 'BINANCE LIVE: BTC/USDT';
                 feedBadge.innerText = 'LIVE'; feedBadge.className = 'badge badge-live';
             } else {
-                feedLbl.innerText = 'SIMULATION FEED';
-                feedBadge.innerText = 'SIM'; feedBadge.className = 'badge badge-sim';
+                feedLbl.innerText = 'BINANCE FEED OFFLINE';
+                feedBadge.innerText = 'OFFLINE'; feedBadge.className = 'badge badge-offline';
             }
 
             // Live-blocked banner
@@ -473,17 +481,32 @@
 
             // Dynamic page title and header label
             const isLive = s.status.mode === 'LIVE';
-            const modeWord = isLive ? 'Live Trading' : 'Paper Trading';
+            const modeWord = isLive ? 'Live Trading' : 'Live Trading (blocked)';
             document.title = 'Alpha Arena | ' + modeWord;
             if (modeLabelEl) { modeLabelEl.innerText = modeWord; modeLabelEl.style.color = isLive ? '#02c076' : '#f0b90b'; }
 
             // Desk prices & PnL
             const btcPnl    = s.desk_pnl ? Number(s.desk_pnl.btc || 0) : (s.desk_equity.btc - countSelected(models, 'btc') * startBalance);
             const basketPnl = s.desk_pnl ? Number(s.desk_pnl.basket || 0) : (s.desk_equity.basket - countSelected(models, 'basket') * startBalance);
+            const strictLive = !!(s.status && s.status.no_simulation && s.status.mode === 'LIVE');
 
-            applyPnlText(btcDeskPnlEl, btcPnl);
+            if (strictLive) {
+                if (btcDeskPnlEl) {
+                    btcDeskPnlEl.innerText = 'N/A (Binance-only)';
+                    btcDeskPnlEl.style.color = '#848e9c';
+                }
+            } else {
+                applyPnlText(btcDeskPnlEl, btcPnl);
+            }
             if (basketPriceDeskEl) basketPriceDeskEl.innerText = '$' + Number(s.prices.basket).toLocaleString(undefined, { maximumFractionDigits: 2 });
-            applyPnlText(basketDeskPnlEl, basketPnl);
+            if (strictLive) {
+                if (basketDeskPnlEl) {
+                    basketDeskPnlEl.innerText = 'N/A (Binance-only)';
+                    basketDeskPnlEl.style.color = '#848e9c';
+                }
+            } else {
+                applyPnlText(basketDeskPnlEl, basketPnl);
+            }
 
             // Split models into groups
             const btcSelected    = names.filter(n => models[n].desk_state && models[n].desk_state.btc && models[n].desk_state.btc.selected);
@@ -496,7 +519,7 @@
                 const btc = m.desk_state ? m.desk_state.btc : null;
                 const locked = !!(btc && btc.selected);
                 const lockedLabel = locked ? 'ON BTC' : '';
-                const pnl = locked ? (btc.balance - startBalance) : ((btc && typeof btc.preview_pnl === 'number') ? btc.preview_pnl : 0);
+                const pnl = locked ? (btc.balance - startBalance) : 0;
                 const view = Object.assign({}, m, { last_signal: (btc && btc.last_signal) || 'IDLE' });
                 return chipHtml(n, view, pnl, ollama, { locked, lockedLabel });
             }).join('');
@@ -506,7 +529,7 @@
                 const basket = m.desk_state ? m.desk_state.basket : null;
                 const locked = !!(basket && basket.selected);
                 const lockedLabel = locked ? 'ON BASKET' : '';
-                const pnl = locked ? (basket.balance - startBalance) : ((basket && typeof basket.preview_pnl === 'number') ? basket.preview_pnl : 0);
+                const pnl = locked ? (basket.balance - startBalance) : 0;
                 const view = Object.assign({}, m, { last_signal: (basket && basket.last_signal) || 'IDLE' });
                 return chipHtml(n, view, pnl, ollama, { locked, lockedLabel });
             }).join('');
@@ -545,8 +568,19 @@
             logBtcEl.innerHTML    = btcLogs.map(msg    => '<div>' + msg + '</div>').join('');
             logBasketEl.innerHTML = basketLogs.map(msg => '<div>' + msg + '</div>').join('');
 
-            pushChartPoint(btcChart,    s.ts, btcPnl);
-            pushChartPoint(basketChart, s.ts, basketPnl);
+            if (strictLive) {
+                const btcPx = Number(s.prices.btc || 0);
+                const basketPx = Number(s.prices.basket || 0);
+                if (btcChartBasePrice === null) btcChartBasePrice = btcPx;
+                if (basketChartBasePrice === null) basketChartBasePrice = basketPx;
+                pushChartPoint(btcChart, s.ts, btcPx - btcChartBasePrice);
+                pushChartPoint(basketChart, s.ts, basketPx - basketChartBasePrice);
+            } else {
+                btcChartBasePrice = null;
+                basketChartBasePrice = null;
+                pushChartPoint(btcChart, s.ts, btcPnl);
+                pushChartPoint(basketChart, s.ts, basketPnl);
+            }
         }
 
         async function postAction(path, model, extra) {
@@ -564,6 +598,40 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ desk, paused })
             });
+            await refreshState();
+        }
+
+        async function backupStores() {
+            const r = await fetch('/api/store/backup', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+            const j = await r.json();
+            if (!r.ok || !j.ok) {
+                alert('Backup failed');
+                return;
+            }
+            const copied = (j.copied || []).join(', ') || 'none';
+            alert('Backup created at: ' + j.backup_dir + '\nCopied: ' + copied);
+            await refreshState();
+        }
+
+        async function purgeStores() {
+            const ok = confirm('This will clear movement log, daily summary, and in-memory model stats. A backup will be created first. Continue?');
+            if (!ok) return;
+            const r = await fetch('/api/store/purge', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ backup_first: true })
+            });
+            const j = await r.json();
+            if (!r.ok || !j.ok) {
+                alert('Clear stores failed');
+                return;
+            }
+            const b = j.backup || {};
+            alert('Stores cleared. Backup: ' + (b.backup_dir || 'n/a'));
             await refreshState();
         }
 
@@ -607,6 +675,8 @@
             const st = (state && state.status) ? state.status : {};
             await setPause('basket', !st.pause_basket);
         });
+        backupStoresBtn.addEventListener('click', backupStores);
+        purgeStoresBtn.addEventListener('click', purgeStores);
 
         async function refreshState() {
             try {

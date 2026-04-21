@@ -5,6 +5,7 @@ import os
 import queue
 import random
 import math
+import shutil
 import threading
 import time
 import hmac
@@ -106,7 +107,7 @@ except ValueError:
     START_BALANCE = 10_000.0
 
 REQUIRE_LIVE_FEED = os.getenv("ALPHA_REQUIRE_LIVE_FEED", "1").strip().lower() in {"1", "true", "yes", "on"}
-STRICT_NO_SIMULATION = os.getenv("ALPHA_NO_SIMULATION", "1").strip().lower() in {"1", "true", "yes", "on"}
+STRICT_NO_SIMULATION = True
 
 AUTO_SELECT_ENABLED = os.getenv("ALPHA_AUTO_SELECT_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
 try:
@@ -238,9 +239,9 @@ def _log_movement(record: dict) -> None:
       ts      – ISO-8601 timestamp
       type    – "price" | "signal" | "pnl"
 
-    price:  btc, eth, sol, bnb, basket (all floats), feed ("live"|"sim")
+        price:  btc, eth, sol, bnb, basket (all floats), feed ("live"|"offline")
     signal: model, desk ("btc"|"basket"), signal ("LONG"|"SHORT"|"HOLD"),
-            source ("ai"|"sim"), price (float)
+            source ("ai"), price (float)
     pnl:    model, desk, price, pos (float), pnl_delta, balance
     """
     record.setdefault("ts", datetime.now().isoformat())
@@ -458,10 +459,110 @@ class ArenaState:
             pass
         return summary
 
+    def _store_paths(self) -> list[Path]:
+        return [Path(MOVEMENT_LOG_FILE), self.summary_path]
+
+    def create_store_backup(self) -> dict:
+        with self.lock:
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_root = Path("backups") / f"store_backup_{stamp}"
+            backup_root.mkdir(parents=True, exist_ok=True)
+            copied: list[str] = []
+            missing: list[str] = []
+            for src in self._store_paths():
+                if src.exists():
+                    dst = backup_root / src.name
+                    shutil.copy2(src, dst)
+                    copied.append(src.name)
+                else:
+                    missing.append(src.name)
+            self.add_log(f"STORE BACKUP CREATED: {backup_root}")
+            return {
+                "backup_dir": str(backup_root),
+                "copied": copied,
+                "missing": missing,
+            }
+
+    def purge_stores(self, backup_first: bool = True) -> dict:
+        with self.lock:
+            backup = None
+            if backup_first:
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_root = Path("backups") / f"store_backup_{stamp}"
+                backup_root.mkdir(parents=True, exist_ok=True)
+                copied: list[str] = []
+                missing: list[str] = []
+                for src in self._store_paths():
+                    if src.exists():
+                        dst = backup_root / src.name
+                        shutil.copy2(src, dst)
+                        copied.append(src.name)
+                    else:
+                        missing.append(src.name)
+                backup = {
+                    "backup_dir": str(backup_root),
+                    "copied": copied,
+                    "missing": missing,
+                }
+
+            # Clear persisted stores.
+            Path(MOVEMENT_LOG_FILE).write_text("", encoding="utf-8")
+            day = datetime.now().strftime("%Y-%m-%d")
+            fresh_summary = self._default_daily_summary(day)
+            self.summary_path.write_text(json.dumps(fresh_summary, indent=2), encoding="utf-8")
+
+            # Reset cached summaries and in-memory logs.
+            self._summary_cache_stamp = None
+            self._summary_cache = fresh_summary
+            self.logs = []
+
+            # Reset per-model desk metrics while keeping selections/config intact.
+            for m in self.models.values():
+                for desk in ("btc", "basket"):
+                    slot = m["desk_state"][desk]
+                    slot["balance"] = START_BALANCE
+                    slot["realized_pnl"] = 0.0
+                    slot["trades"] = 0
+                    slot["wins"] = 0
+                    slot["losses"] = 0
+                    slot["pos"] = 0.0
+                    slot["entry"] = 0.0
+                    slot["signal_source"] = "none"
+                    slot["last_signal"] = "IDLE"
+                    slot["hold_streak"] = 0
+                    slot["hold_signals"] = 0
+                    slot["directional_signals"] = 0
+                    slot["trade_side"] = "FLAT"
+                    slot["trade_open_balance"] = START_BALANCE
+
+            self.add_log("STORES CLEARED: movement log, daily summary, and in-memory stats reset")
+            return {
+                "ok": True,
+                "backup": backup,
+            }
+
     def _desk_symbols(self, desk: str) -> list[str]:
         if desk == "basket":
             return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
         return ["BTCUSDT"]
+
+    def _symbol_min_notional_usd(self, symbol: str) -> float:
+        price_key = _SYMBOL_PRICE_KEY.get(symbol, "btc")
+        price = max(float(self.prices.get(price_key, 0.0) or 0.0), 1e-9)
+        precision = _FUTURES_QTY_PRECISION.get(symbol, 3)
+        step_floor = price / (10 ** precision)
+        exchange_floor = _FUTURES_MIN_NOTIONAL_USD.get(symbol, 5.0)
+        return max(exchange_floor, step_floor, 5.0)
+
+    def _desk_min_notional_usd(self, desk: str) -> float:
+        symbols = self._desk_symbols(desk)
+        floors = [self._symbol_min_notional_usd(sym) for sym in symbols]
+        return min(floors) if floors else 5.0
+
+    def _global_min_notional_usd(self) -> float:
+        symbols = {"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"}
+        floors = [self._symbol_min_notional_usd(sym) for sym in symbols]
+        return min(floors) if floors else 5.0
 
     def _portfolio_pnl(self) -> float:
         total = 0.0
@@ -620,11 +721,12 @@ class ArenaState:
         time.sleep(2)  # let the price feed settle first
         try:
             usdt_free = self._get_futures_usdt_balance()
-            if usdt_free < 5.0:
+            min_needed = self._global_min_notional_usd()
+            if usdt_free + 1e-9 < min_needed:
                 with self.lock:
                     self.live_blocked = True
                     self.live_blocked_reason = (
-                        f"Insufficient USDT in Futures wallet (free ${usdt_free:.2f}, need >= $5.00). "
+                        f"Insufficient USDT in Futures wallet (free ${usdt_free:.2f}, need >= ${min_needed:.2f}). "
                         "Deposit USDT to your Binance Futures account."
                     )
                     self.add_log(f"LIVE BLOCKED: {self.live_blocked_reason}")
@@ -771,16 +873,25 @@ class ArenaState:
                 self.add_log(f"{model_name} LIVE precheck failed: {exc}")
             return
 
-        effective_order_usd = min(total_order_usd, max(free_usdt, 0.0))
-        if effective_order_usd < 5.0:
+        # Global funds block should only apply when no supported symbol can be traded.
+        global_min_needed = self._global_min_notional_usd()
+        if free_usdt + 1e-9 < global_min_needed:
             with self.lock:
                 if not self.live_blocked:
                     self.live_blocked = True
                     self.live_blocked_reason = (
-                        f"Insufficient USDT in Futures wallet (need >= $5.00, free ${free_usdt:.2f})"
+                        f"Insufficient USDT in Futures wallet (free ${free_usdt:.2f}, need >= ${global_min_needed:.2f})"
                     )
                     self.add_log(f"LIVE BLOCKED: {self.live_blocked_reason}")
             return
+
+        if self.live_blocked and "Insufficient USDT" in self.live_blocked_reason and free_usdt + 1e-9 >= global_min_needed:
+            with self.lock:
+                self.live_blocked = False
+                self.live_blocked_reason = ""
+                self.add_log(f"LIVE UNBLOCKED: Futures USDT now sufficient (${free_usdt:.2f})")
+
+        effective_order_usd = min(total_order_usd, max(free_usdt, 0.0))
 
         # Interpret ALPHA_LIVE_ORDER_USD as total notional per signal and
         # allocate only across symbols that can satisfy min notional/lot constraints.
@@ -801,12 +912,42 @@ class ArenaState:
                 remaining -= floor
 
         if not allocations:
+            # Fallback: if the desk-specific symbol set is unaffordable (common for BTC desk
+            # with small order budgets), route to any tradable symbol instead of skipping.
+            all_symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
+            fallback_floor: dict[str, float] = {}
+            for symbol in all_symbols:
+                price_key = _SYMBOL_PRICE_KEY.get(symbol, "btc")
+                price = max(float(self.prices.get(price_key, 0.0) or 0.0), 1e-9)
+                precision = _FUTURES_QTY_PRECISION.get(symbol, 3)
+                step_floor = price / (10 ** precision)
+                exchange_floor = _FUTURES_MIN_NOTIONAL_USD.get(symbol, 5.0)
+                fallback_floor[symbol] = max(exchange_floor, step_floor, 5.0)
+
+            remaining_fb = max(effective_order_usd, 0.0)
+            for symbol, floor in sorted(fallback_floor.items(), key=lambda kv: kv[1]):
+                if floor <= remaining_fb:
+                    allocations[symbol] = floor
+                    remaining_fb -= floor
+
+            if allocations and remaining_fb > 0:
+                per_symbol_extra = remaining_fb / len(allocations)
+                for symbol in allocations:
+                    allocations[symbol] = min(allocations[symbol] + per_symbol_extra, self.max_order_usd)
+
+            if not allocations:
+                with self.lock:
+                    self.add_log(
+                        f"{model_name} LIVE skipped: total ${effective_order_usd:.2f} cannot satisfy any symbol min size "
+                        f"({', '.join(f'{s}~${fallback_floor[s]:.2f}' for s in all_symbols)})"
+                    )
+                return
             with self.lock:
                 self.add_log(
-                    f"{model_name} LIVE skipped: total ${effective_order_usd:.2f} cannot satisfy any symbol min size "
-                    f"({', '.join(f'{s}~${symbol_floor[s]:.2f}' for s in symbols)})"
+                    f"{model_name} LIVE fallback routing: desk {desk.upper()} could not meet min size; "
+                    f"using {', '.join(allocations.keys())}"
                 )
-            return
+            remaining = 0.0
 
         if remaining > 0:
             per_symbol_extra = remaining / len(allocations)
@@ -814,12 +955,6 @@ class ArenaState:
                 allocations[symbol] = min(allocations[symbol] + per_symbol_extra, self.max_order_usd)
 
         required_usdt = sum(allocations.values())
-
-        if self.live_blocked and "Insufficient USDT" in self.live_blocked_reason and free_usdt + 1e-9 >= required_usdt:
-            with self.lock:
-                self.live_blocked = False
-                self.live_blocked_reason = ""
-                self.add_log(f"LIVE UNBLOCKED: Futures USDT now sufficient (${free_usdt:.2f})")
 
         if free_usdt + 1e-9 < required_usdt:
             with self.lock:
@@ -851,7 +986,6 @@ class ArenaState:
             "losses": 0,
             "pos": 0.0,
             "entry": 0.0,
-            "preview_pnl": 0.0,
             "signal_source": "none",  # 'none' | 'ai'
             "last_signal": "IDLE",   # LONG | SHORT | HOLD | IDLE
             "hold_streak": 0,
@@ -1112,7 +1246,7 @@ class ArenaState:
             if self.require_live_feed and not self.feed_paused:
                 self.feed_paused = True
                 self.feed_pause_reason = "Binance live market data unavailable"
-                self.add_log(f"LIVE FEED LOST: trading paused (no simulation fallback) | cause: {self.feed_error}")
+                self.add_log(f"LIVE FEED LOST: trading paused | cause: {self.feed_error}")
 
         self.recalc_basket()
         # Save to rolling price history (used to enrich LLM prompts)
@@ -1143,23 +1277,6 @@ class ArenaState:
                     continue
                 slot = m["desk_state"][desk]
                 ref_price = self.prices["basket"] if desk == "basket" else self.prices["btc"]
-                simulate_pnl = (not self.live_trading) or (self.live_trading and not self.live_blocked)
-
-                if simulate_pnl and slot["selected"] and slot["pos"] != 0:
-                    pnl_delta = (ref_price - slot["entry"]) * slot["pos"]
-                    slot["balance"] += pnl_delta
-                    slot["entry"] = ref_price
-                    # Log every significant P&L change for movement analysis.
-                    if abs(pnl_delta) >= 0.01:
-                        _log_movement({
-                            "type":      "pnl",
-                            "model":     name,
-                            "desk":      desk,
-                            "price":     round(ref_price, 2),
-                            "pos":       round(slot["pos"], 8),
-                            "pnl_delta": round(pnl_delta, 4),
-                            "balance":   round(slot["balance"], 4),
-                        })
 
                 # Trade cadence adapts to movement regime (normal vs aggressive).
                 should_trade = slot["selected"] and random.random() < self._signal_chance(desk)
@@ -1173,8 +1290,6 @@ class ArenaState:
                             self.ollama_signal_queue.put((name, desk, ollama_tag, ref_price))
                     else:
                         self.add_log(f"{name} [{desk.upper()}]: skipped (no mapped Ollama model)")
-
-                slot["preview_pnl"] = slot["balance"] - START_BALANCE
 
     def _apply_ollama_signal(self, name: str, desk_key: str, ollama_tag: str, ref_price: float) -> None:
         history = list(self.price_history)  # snapshot outside lock
@@ -1224,6 +1339,7 @@ class ArenaState:
 
     def snapshot(self) -> dict:
         with self.lock:
+            strict_live_mode = self.strict_no_simulation and self.live_trading
             btc_equity = sum(m["desk_state"]["btc"]["balance"] for m in self.models.values() if m["desk_state"]["btc"]["selected"])
             basket_equity = sum(m["desk_state"]["basket"]["balance"] for m in self.models.values() if m["desk_state"]["basket"]["selected"])
             btc_pnl = sum(
@@ -1236,6 +1352,11 @@ class ArenaState:
                 + (m["desk_state"]["basket"]["balance"] - START_BALANCE if m["desk_state"]["basket"]["selected"] else 0.0)
                 for m in self.models.values()
             )
+            if strict_live_mode:
+                # In strict no-simulation live mode, hide internal desk/model PnL
+                # to keep all displayed performance tied to Binance account equity.
+                btc_pnl = 0.0
+                basket_pnl = 0.0
             app_total_pnl = btc_pnl + basket_pnl
             if self.strict_no_simulation and self.binance_pnl.get("available"):
                 app_total_pnl = float(self.binance_pnl.get("equity_delta_usd", 0.0) or 0.0)
@@ -1251,13 +1372,13 @@ class ArenaState:
                     total_r += r
                 model_stats[nm] = {
                     "color": mm["color"],
-                    "total_pnl": round(total_r, 4),
-                    "btc_pnl": round(
+                    "total_pnl": 0.0 if strict_live_mode else round(total_r, 4),
+                    "btc_pnl": 0.0 if strict_live_mode else round(
                         mm["desk_state"]["btc"].get("realized_pnl", 0.0)
                         + (mm["desk_state"]["btc"]["balance"] - START_BALANCE if mm["desk_state"]["btc"]["selected"] else 0.0),
                         4,
                     ),
-                    "basket_pnl": round(
+                    "basket_pnl": 0.0 if strict_live_mode else round(
                         mm["desk_state"]["basket"].get("realized_pnl", 0.0)
                         + (mm["desk_state"]["basket"]["balance"] - START_BALANCE if mm["desk_state"]["basket"]["selected"] else 0.0),
                         4,
@@ -1274,7 +1395,10 @@ class ArenaState:
                 },
                 "status": {
                     "feed": "LIVE" if self.live_feed else "OFFLINE",
-                    "mode": "LIVE" if self.live_trading else "PAPER",
+                    "mode": (
+                        "LIVE_BLOCKED" if (self.live_trading and self.live_blocked)
+                        else ("LIVE" if self.live_trading else "LIVE_BLOCKED")
+                    ),
                     "no_simulation": self.strict_no_simulation,
                     "require_live_feed": self.require_live_feed,
                     "feed_paused": self.feed_paused,
@@ -1330,7 +1454,7 @@ class ArenaState:
             self.step_models()
 
 
-def simulation_loop(state: ArenaState) -> None:
+def trading_loop(state: ArenaState) -> None:
     while True:
         state.tick()
         time.sleep(TICK_SECONDS)
@@ -1358,7 +1482,7 @@ class ArenaHandler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self) -> None:
-        if self.path not in {"/api/select", "/api/deselect", "/api/pause"}:
+        if self.path not in {"/api/select", "/api/deselect", "/api/pause", "/api/store/backup", "/api/store/purge"}:
             self._json(404, {"ok": False, "error": "Not found"})
             return
 
@@ -1367,6 +1491,17 @@ class ArenaHandler(SimpleHTTPRequestHandler):
             data = json.loads(self.rfile.read(content_length).decode("utf-8")) if content_length else {}
         except Exception:
             self._json(400, {"ok": False, "error": "Invalid JSON"})
+            return
+
+        if self.path == "/api/store/backup":
+            info = self.state.create_store_backup()
+            self._json(200, {"ok": True, **info})
+            return
+
+        if self.path == "/api/store/purge":
+            backup_first = data.get("backup_first", True)
+            info = self.state.purge_stores(bool(backup_first))
+            self._json(200, info)
             return
 
         if self.path == "/api/pause":
@@ -1409,12 +1544,12 @@ def main() -> None:
     state = ArenaState()
     ArenaHandler.state = state
 
-    worker = threading.Thread(target=simulation_loop, args=(state,), daemon=True)
+    worker = threading.Thread(target=trading_loop, args=(state,), daemon=True)
     worker.start()
 
     web_root = Path(__file__).resolve().parent
     server = ThreadingHTTPServer((HOST, PORT), ArenaHandler)
-    print(f"Serving Alpha Arena paper backend on http://{HOST}:{PORT}")
+    print(f"Serving Alpha Arena live backend on http://{HOST}:{PORT}")
     print(f"Web root: {web_root}")
     try:
         server.serve_forever()
