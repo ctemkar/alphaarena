@@ -575,8 +575,8 @@ class ArenaState:
                             "balance":   round(slot["balance"], 4),
                         })
 
-                # Decide whether to make a new trade this tick
-                should_trade = slot["selected"] and random.random() > 0.94
+                # Decide whether to make a new trade this tick (6% chance per tick = ~1 per 50s)
+                should_trade = slot["selected"] and random.random() > 0.88
                 if should_trade:
                     ollama_tag = OLLAMA_MODELS.get(name)
                     if ollama_tag:
@@ -588,13 +588,42 @@ class ArenaState:
                             daemon=True,
                         ).start()
                     else:
-                        action = 1 if random.random() < m["bias"] else -1
-                        slot["pos"] = action * (slot["balance"] / max(ref_price, 1.0)) * 0.4
-                        slot["entry"] = ref_price
-                        side = "LONG" if action > 0 else "SHORT"
+                        # 6% HOLD probability closes the trade and flattens position.
+                        rand = random.random()
+                        if rand > 0.94:
+                            action = 1 if random.random() < m["bias"] else -1
+                            side = "LONG" if action > 0 else "SHORT"
+                        elif rand > 0.88:
+                            action = 0
+                            side = "HOLD"
+                        else:
+                            action = 1 if random.random() < m["bias"] else -1
+                            side = "LONG" if action > 0 else "SHORT"
                         slot["signal_source"] = "sim"
                         slot["last_signal"] = side
-                        self._roll_trade_on_signal(name, desk, slot, side, ref_price, "signal_flip")
+                        if side == "HOLD":
+                            # Close any open trade and flatten position.
+                            self._close_trade_if_open(name, desk, slot, "hold_signal", ref_price)
+                            slot["pos"] = 0.0
+                        else:
+                            slot["pos"] = action * (slot["balance"] / max(ref_price, 1.0)) * 0.4
+                            slot["entry"] = ref_price
+                            self._roll_trade_on_signal(name, desk, slot, side, ref_price, "signal_flip")
+                            self._execute_live_signal(name, desk, side)
+                        self.add_log(f"{name} [{desk.upper()}]: {side} @ ${ref_price:,.2f} [sim]")
+                        _log_movement({
+                            "type":   "signal",
+                            "model":  name,
+                            "desk":   desk,
+                            "signal": side,
+                            "source": "sim",
+                            "price":  round(ref_price, 2),
+                        }
+                        else:
+                            slot["pos"] = action * (slot["balance"] / max(ref_price, 1.0)) * 0.4
+                            slot["entry"] = ref_price
+                            self._roll_trade_on_signal(name, desk, slot, side, ref_price, "signal_flip")
+                            self._execute_live_signal(name, desk, side)
                         self.add_log(f"{name} [{desk.upper()}]: {side} @ ${ref_price:,.2f} [sim]")
                         _log_movement({
                             "type":   "signal",
@@ -604,16 +633,18 @@ class ArenaState:
                             "source": "sim",
                             "price":  round(ref_price, 2),
                         })
-                        self._execute_live_signal(name, desk, side)
 
                 slot["preview_pnl"] += (random.random() - 0.5) * 18
-                slot["preview_pnl"] = max(-500.0, min(500.0, slot["preview_pnl"]))
-
-    def _apply_ollama_signal(self, name: str, desk_key: str, ollama_tag: str, ref_price: float) -> None:
-        """Called in a background thread. Queries Ollama then applies the result."""
-        action = _ollama_signal(ollama_tag, ref_price, desk_key)
-        live_desk = desk_key
-        live_side = "HOLD"
+            side = "LONG" if action == 1 else ("SHORT" if action == -1 else "HOLD")
+            slot["signal_source"] = "ai"
+            slot["last_signal"] = side
+            if side == "HOLD":
+                # HOLD closes the open trade and flattens position.
+                self._close_trade_if_open(name, desk_key, slot, "hold_signal", ref_price)
+                slot["pos"] = 0.0
+            else:
+                slot["pos"] = action * (slot["balance"] / max(ref_price, 1.0)) * 0.4
+                slot["entry"] = ref_price
         with self.lock:
             m = self.models.get(name)
             if not m:
@@ -621,13 +652,16 @@ class ArenaState:
             slot = m["desk_state"][desk_key]
             if not slot["selected"]:
                 return
-            if action != 0:
-                slot["pos"] = action * (slot["balance"] / max(ref_price, 1.0)) * 0.4
-                slot["entry"] = ref_price
             side = "LONG" if action == 1 else ("SHORT" if action == -1 else "HOLD")
             slot["signal_source"] = "ai"
             slot["last_signal"] = side
-            if side in {"LONG", "SHORT"}:
+            if side == "HOLD":
+                # HOLD closes the open trade and flattens position.
+                self._close_trade_if_open(name, desk_key, slot, "hold_signal", ref_price)
+                slot["pos"] = 0.0
+            else:
+                slot["pos"] = action * (slot["balance"] / max(ref_price, 1.0)) * 0.4
+                slot["entry"] = ref_price
                 self._roll_trade_on_signal(name, desk_key, slot, side, ref_price, "signal_flip")
             desk = desk_key.upper()
             live_side = side
