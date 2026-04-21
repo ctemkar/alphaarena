@@ -2,89 +2,90 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Alpha Arena | Paper Trading</title>
+    <title>Alpha Arena | Trading</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        body { font-family: 'Inter', sans-serif; background: #0b0e11; color: #eaecef; margin: 0; padding: 24px; box-sizing: border-box; font-size: 26px; }
+        body { font-family: 'Inter', sans-serif; background: #0b0e11; color: #eaecef; margin: 0; padding: 24px; box-sizing: border-box; font-size: 18px; font-weight: 400; }
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #2b2f36; padding-bottom: 16px; }
-        .header h2 { font-size: 36px; }
-        .live-indicator { color: #02c076; font-weight: bold; display: flex; align-items: center; font-size: 24px; }
-        .dot { height: 14px; width: 14px; background: #02c076; border-radius: 50%; margin-right: 10px; animation: blink 1s infinite; }
+        .header h2 { font-size: 24px; font-weight: 500; }
+        .live-indicator { color: #02c076; font-weight: 400; display: flex; align-items: center; font-size: 17px; }
+        .dot { height: 10px; width: 10px; background: #02c076; border-radius: 50%; margin-right: 8px; animation: blink 1s infinite; }
         @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }
 
-        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; margin-bottom: 20px; }
-        .card { background: #181a20; padding: 18px; border-radius: 8px; border: 1px solid #2b2f36; }
-        .card h4 { margin: 0; color: #848e9c; font-size: 22px; text-transform: uppercase; letter-spacing: 0.5px; }
-        .card .val { font-size: 40px; margin-top: 8px; font-weight: bold; }
-        .card .sub { margin-top: 8px; font-size: 16px; line-height: 1.35; color: #b7bdc6; }
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
+        .card { background: #181a20; padding: 14px; border-radius: 8px; border: 1px solid #2b2f36; }
+        .card h4 { margin: 0; color: #848e9c; font-size: 15px; font-weight: 400; text-transform: uppercase; letter-spacing: 0.5px; }
+        .card .val { font-size: 26px; margin-top: 6px; font-weight: 500; }
+        .card .sub { margin-top: 6px; font-size: 16px; line-height: 1.35; color: #b7bdc6; }
 
-        .chip-wrap { display: flex; flex-wrap: wrap; gap: 10px; }
+        .chip-wrap { display: flex; flex-wrap: wrap; gap: 8px; }
         .chip {
             border: 1px solid #2b2f36;
             border-radius: 999px;
             background: #10151b;
             color: #eaecef;
-            padding: 10px 18px;
-            font-size: 24px;
+            padding: 6px 14px;
+            font-size: 17px;
+            font-weight: 400;
             cursor: pointer;
             display: inline-flex;
             align-items: center;
-            gap: 10px;
+            gap: 8px;
         }
         .chip:hover { border-color: #f0b90b; }
         .chip.selected-chip { border-color: #2b6cb0; background: #0d1b2e; }
         .chip.selected-chip:hover { border-color: #f84960; }
         .chip.chip-locked { opacity: 0.6; cursor: not-allowed; border-color: #3a3f47; }
         .chip.chip-locked:hover { border-color: #3a3f47; }
-        .chip-name { font-weight: 600; }
+        .chip-name { font-weight: 500; }
         .chip-pnl-pos { color: #02c076; }
         .chip-pnl-neg { color: #f84960; }
         .chip-pnl-flat { color: #848e9c; }
-        .badge-ai { font-size: 17px; background: #a7f432; color: #0b0e11; border-radius: 4px; padding: 2px 7px; margin-left: 6px; font-weight: 700; vertical-align: middle; }
-        .badge-lock { font-size: 16px; background: #3a3f47; color: #d1d4dc; border-radius: 4px; padding: 2px 7px; margin-left: 6px; font-weight: 700; vertical-align: middle; }
-        .sig-long  { font-size: 17px; color: #02c076; background: rgba(2,192,118,.15); border-radius: 4px; padding: 2px 7px; margin-left: 6px; font-weight: 700; }
-        .sig-short { font-size: 17px; color: #f84960; background: rgba(248,73,96,.15);  border-radius: 4px; padding: 2px 7px; margin-left: 6px; font-weight: 700; }
-        .sig-hold  { font-size: 17px; color: #f0b90b; background: rgba(240,185,11,.15); border-radius: 4px; padding: 2px 7px; margin-left: 6px; font-weight: 700; }
+        .badge-ai { font-size: 15px; background: #a7f432; color: #0b0e11; border-radius: 3px; padding: 1px 5px; margin-left: 4px; font-weight: 600; vertical-align: middle; }
+        .badge-lock { font-size: 15px; background: #3a3f47; color: #d1d4dc; border-radius: 3px; padding: 1px 5px; margin-left: 4px; font-weight: 400; vertical-align: middle; }
+        .sig-long  { font-size: 15px; color: #02c076; background: rgba(2,192,118,.15); border-radius: 3px; padding: 1px 5px; margin-left: 4px; font-weight: 500; }
+        .sig-short { font-size: 15px; color: #f84960; background: rgba(248,73,96,.15);  border-radius: 3px; padding: 1px 5px; margin-left: 4px; font-weight: 500; }
+        .sig-hold  { font-size: 15px; color: #f0b90b; background: rgba(240,185,11,.15); border-radius: 3px; padding: 1px 5px; margin-left: 4px; font-weight: 500; }
 
-        .badge { font-size: 20px; padding: 4px 12px; border-radius: 12px; margin-left: 10px; }
+        .badge { font-size: 16px; padding: 3px 8px; border-radius: 10px; margin-left: 8px; font-weight: 400; }
         .badge-live { background: #02c07622; color: #02c076; }
         .badge-sim  { background: #f0b90b22; color: #f0b90b; }
 
         /* Two fully independent desk sections — stacked vertically */
-        .desks-stack { display: flex; flex-direction: column; gap: 24px; }
-        .desk-section { background: #181a20; border: 1px solid #2b2f36; border-radius: 10px; padding: 24px; }
-        .desk-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
-        .desk-header h2 { margin: 0; font-size: 28px; }
-        .desk-price { font-size: 20px; color: #848e9c; }
-        .desk-pnl-badge { font-size: 22px; font-weight: 700; }
+        .desks-stack { display: flex; flex-direction: column; gap: 16px; }
+        .desk-section { background: #181a20; border: 1px solid #2b2f36; border-radius: 10px; padding: 18px; }
+        .desk-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+        .desk-header h2 { margin: 0; font-size: 20px; font-weight: 500; }
+        .desk-price { font-size: 17px; color: #848e9c; }
+        .desk-pnl-badge { font-size: 18px; font-weight: 500; }
         /* chips left, chart right */
-        .desk-body { display: grid; grid-template-columns: 1fr 440px; gap: 20px; align-items: start; }
-        .desk-left { display: flex; flex-direction: column; gap: 12px; }
-        .section-label { font-size: 16px; text-transform: uppercase; letter-spacing: 0.6px; color: #848e9c; margin-bottom: 4px; }
-        .divider { border: none; border-top: 1px solid #2b2f36; margin: 6px 0; }
-        .chart-box { height: 260px; position: relative; }
-        .empty { color: #848e9c; font-size: 18px; padding: 4px 0; }
-        .trade-log { max-height: 150px; overflow-y: auto; font-size: 17px; color: #848e9c; border-top: 1px solid #2b2f36; padding-top: 8px; margin-top: 6px; }
-        .trade-log div { padding: 3px 0; }
+        .desk-body { display: grid; grid-template-columns: 1fr 380px; gap: 16px; align-items: start; }
+        .desk-left { display: flex; flex-direction: column; gap: 10px; }
+        .section-label { font-size: 15px; text-transform: uppercase; letter-spacing: 0.6px; color: #848e9c; margin-bottom: 2px; }
+        .divider { border: none; border-top: 1px solid #2b2f36; margin: 4px 0; }
+        .chart-box { height: 200px; position: relative; }
+        .empty { color: #848e9c; font-size: 17px; padding: 4px 0; }
+        .trade-log { max-height: 120px; overflow-y: auto; font-size: 16px; color: #848e9c; border-top: 1px solid #2b2f36; padding-top: 6px; margin-top: 4px; }
+        .trade-log div { padding: 2px 0; }
 
         /* LIVE BLOCKED banner */
-        #live-blocked-banner { display:none; background:#f8496022; border:1px solid #f84960; border-radius:8px; padding:14px 20px; margin-bottom:18px; color:#f84960; font-size:22px; font-weight:600; }
-        #live-blocked-banner span { font-weight:400; color:#e8a0a8; margin-left:10px; font-size:18px; }
+        #live-blocked-banner { display:none; background:#f8496022; border:1px solid #f84960; border-radius:8px; padding:10px 16px; margin-bottom:14px; color:#f84960; font-size:17px; font-weight:500; }
+        #live-blocked-banner span { font-weight:400; color:#e8a0a8; margin-left:8px; font-size:16px; }
 
         /* LLM Performance Report */
-        .llm-report { background:#181a20; border:1px solid #2b2f36; border-radius:10px; padding:24px; margin-top:24px; }
-        .llm-report h3 { margin:0 0 16px; font-size:24px; color:#eaecef; }
-        .llm-table { width:100%; border-collapse:collapse; font-size:19px; }
-        .llm-table th { color:#848e9c; text-transform:uppercase; font-size:16px; letter-spacing:0.5px; padding:8px 10px; border-bottom:1px solid #2b2f36; text-align:right; }
+        .llm-report { background:#181a20; border:1px solid #2b2f36; border-radius:10px; padding:18px; margin-top:16px; }
+        .llm-report h3 { margin:0 0 12px; font-size:18px; font-weight:500; color:#eaecef; }
+        .llm-table { width:100%; border-collapse:collapse; font-size:17px; }
+        .llm-table th { color:#848e9c; text-transform:uppercase; font-size:15px; font-weight:400; letter-spacing:0.5px; padding:6px 8px; border-bottom:1px solid #2b2f36; text-align:right; }
         .llm-table th:first-child { text-align:left; }
-        .llm-table td { padding:10px 10px; border-bottom:1px solid #161a1f; text-align:right; }
+        .llm-table td { padding:8px 8px; border-bottom:1px solid #161a1f; text-align:right; }
         .llm-table td:first-child { text-align:left; }
         .llm-table tr:last-child td { border-bottom:none; }
         .llm-table tr:hover td { background:#1e2330; }
         .rank-1 td:first-child { color:#f0b90b; }
         .pnl-pos { color:#02c076; } .pnl-neg { color:#f84960; } .pnl-flat { color:#848e9c; }
-        .desk-dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; }
-        .sig-badge { font-size:14px; border-radius:3px; padding:1px 6px; font-weight:700; }
+        .desk-dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:4px; }
+        .sig-badge { font-size:15px; border-radius:3px; padding:1px 5px; font-weight:500; }
         .sig-l { background:rgba(2,192,118,.2); color:#02c076; }
         .sig-s { background:rgba(248,73,96,.2); color:#f84960; }
         .sig-h { background:rgba(240,185,11,.2); color:#f0b90b; }
@@ -97,7 +98,7 @@
 </head>
 <body>
     <div class="header">
-        <h2 style="margin:0">Alpha Arena <span style="color:#f0b90b">Paper Trading</span></h2>
+        <h2 style="margin:0">Alpha Arena <span id="mode-label" style="color:#f0b90b">Trading</span></h2>
         <div class="live-indicator">
             <span class="dot"></span>
             <span id="feed-label">CONNECTING...</span>
@@ -192,6 +193,8 @@
             </tbody>
         </table>
     </div>
+
+    <script>
         const btcPriceEl      = document.getElementById('btc-price');       // stats bar
         const btcPriceDeskEl  = document.getElementById('btc-price-desk');  // desk header
         const btcDeskPnlEl    = document.getElementById('btc-desk-pnl');
@@ -211,6 +214,7 @@
         const emptyBasketEl   = document.getElementById('empty-basket');
         const logBtcEl        = document.getElementById('log-btc');
         const logBasketEl     = document.getElementById('log-basket');
+        const modeLabelEl     = document.getElementById('mode-label');
         const liveBlockedBanner = document.getElementById('live-blocked-banner');
         const liveBlockedReason = document.getElementById('live-blocked-reason');
         const llmReportBody   = document.getElementById('llm-report-body');
@@ -244,7 +248,7 @@
                             grid: { color: '#2b2f36' },
                             ticks: {
                                 color: '#848e9c',
-                                font: { size: 22 },
+                                font: { size: 15 },
                                 callback: (v) => formatPnl(Number(v)),
                             },
                         }
@@ -368,6 +372,12 @@
             if (btcPriceEl)       btcPriceEl.innerText       = '$' + Number(s.prices.btc).toLocaleString(undefined, { maximumFractionDigits: 2 });
             if (btcPriceDeskEl)   btcPriceDeskEl.innerText   = '$' + Number(s.prices.btc).toLocaleString(undefined, { maximumFractionDigits: 2 });
             if (modeEl)           modeEl.innerText           = s.status.mode;
+
+            // Dynamic page title and header label
+            const isLive = s.status.mode === 'LIVE';
+            const modeWord = isLive ? 'Live Trading' : 'Paper Trading';
+            document.title = 'Alpha Arena | ' + modeWord;
+            if (modeLabelEl) { modeLabelEl.innerText = modeWord; modeLabelEl.style.color = isLive ? '#02c076' : '#f0b90b'; }
 
             // Desk prices & PnL
             const btcPnl    = s.desk_pnl ? Number(s.desk_pnl.btc || 0) : (s.desk_equity.btc - countSelected(models, 'btc') * startBalance);

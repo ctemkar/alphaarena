@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import collections
 import json
 import os
 import queue
@@ -20,7 +21,23 @@ START_BALANCE = 10_000.0
 MAX_LOGS = 60
 TICK_SECONDS = 3.0
 OLLAMA_URL = "http://127.0.0.1:11434"
-BINANCE_BASE_URL = "https://api.binance.com"
+BINANCE_BASE_URL     = "https://api.binance.com"       # Spot (not used for trading)
+BINANCE_FUTURES_URL  = "https://fapi.binance.com"      # USDT-M Perpetual Futures
+
+# Futures quantity precision (step size) per symbol
+_FUTURES_QTY_PRECISION: dict[str, int] = {
+    "BTCUSDT": 3,
+    "ETHUSDT": 3,
+    "SOLUSDT": 1,
+    "BNBUSDT": 2,
+}
+# Symbol → key in self.prices
+_SYMBOL_PRICE_KEY: dict[str, str] = {
+    "BTCUSDT": "btc",
+    "ETHUSDT": "eth",
+    "SOLUSDT": "sol",
+    "BNBUSDT": "bnb",
+}
 
 
 def _load_dotenv(path: str = ".env") -> None:
@@ -43,7 +60,7 @@ _load_dotenv()
 BINANCE_API_KEY = os.getenv("EXCH_BINANCE_API_KEY", "")
 BINANCE_API_SECRET = os.getenv("EXCH_BINANCE_API_SECRET", "")
 LIVE_TRADING_ENABLED = os.getenv("ALPHA_LIVE_TRADING", "0").strip().lower() in {"1", "true", "yes", "on"}
-ALLOW_SPOT_SHORT = os.getenv("ALPHA_ALLOW_SPOT_SHORT", "0").strip().lower() in {"1", "true", "yes", "on"}
+USE_FUTURES = os.getenv("ALPHA_USE_FUTURES", "1").strip().lower() not in {"0", "false", "no", "off"}
 try:
     ANALYTICS_FEE_BPS = float(os.getenv("ALPHA_ANALYTICS_FEE_BPS", "10"))
 except ValueError:
@@ -86,12 +103,43 @@ OLLAMA_MODELS: dict[str, str] = {
 }
 
 
-def _ollama_signal(ollama_tag: str, price: float, desk: str) -> int:
-    """Query Ollama for a trading signal. Returns +1 LONG, -1 SHORT, 0 HOLD."""
+def _ollama_signal(
+    ollama_tag: str,
+    price: float,
+    desk: str,
+    price_history: list[dict] | None = None,
+) -> tuple[int, str]:
+    """Query Ollama for a trading signal.
+
+    Returns (signal, error_str) where:
+      signal   – +1 LONG, -1 SHORT, 0 HOLD
+      error_str – empty string on success, reason string on failure
+    """
     asset = "BTC" if desk == "btc" else "BASKET (BTC/ETH/SOL/BNB)"
+    key = "btc" if desk == "btc" else "basket"
+
+    # Build trend context from price history
+    trend_lines = []
+    if price_history and len(price_history) >= 2:
+        prices_seq = [h[key] for h in price_history if key in h]
+        if len(prices_seq) >= 2:
+            oldest = prices_seq[0]
+            pct_5min = (price - oldest) / oldest * 100 if oldest else 0.0
+            direction = "up" if pct_5min > 0.01 else ("down" if pct_5min < -0.01 else "flat")
+            trend_lines.append(
+                f"Price trend over last ~{len(prices_seq) * 3}s: {direction} "
+                f"({pct_5min:+.3f}% from ${oldest:,.2f})."
+            )
+        # Tick-over-tick momentum (last 2 ticks)
+        if len(prices_seq) >= 2:
+            tick_chg = (prices_seq[-1] - prices_seq[-2]) / prices_seq[-2] * 100 if prices_seq[-2] else 0.0
+            trend_lines.append(f"Last tick change: {tick_chg:+.4f}%.")
+
+    context = " ".join(trend_lines)
     prompt = (
-        f"Current {asset} price: ${price:,.2f}. "
-        "Should a short-term trader go LONG, SHORT, or HOLD right now? "
+        f"You are a short-term crypto trader. {asset} current price: ${price:,.2f}. "
+        + (context + " " if context else "")
+        + "Based on this price action, should a short-term trader go LONG, SHORT, or HOLD? "
         "Reply with exactly one word: LONG, SHORT, or HOLD."
     )
     payload = json.dumps({"model": ollama_tag, "prompt": prompt, "stream": False}).encode()
@@ -102,16 +150,20 @@ def _ollama_signal(ollama_tag: str, price: float, desk: str) -> int:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=4.0) as resp:
+        with urllib.request.urlopen(req, timeout=8.0) as resp:
             result = json.loads(resp.read().decode())
             text = result.get("response", "").strip().upper()
             if "LONG" in text:
-                return 1
+                return 1, ""
             if "SHORT" in text:
-                return -1
-            return 0
-    except Exception:
-        return 0  # fall back to HOLD on any error
+                return -1, ""
+            return 0, ""
+    except urllib.error.URLError as exc:
+        return 0, f"network: {exc.reason}"
+    except TimeoutError:
+        return 0, "timeout"
+    except Exception as exc:
+        return 0, str(exc)[:80]
 
 
 def now_ts() -> str:
@@ -164,6 +216,8 @@ class ArenaState:
             "bnb": 630.0,
             "basket": 0.0,
         }
+        # Rolling price history: last 20 ticks (~1 min at 3s/tick)
+        self.price_history: collections.deque[dict] = collections.deque(maxlen=20)
         self.live_feed = False
         self.live_trading = bool(LIVE_TRADING_ENABLED and BINANCE_API_KEY and BINANCE_API_SECRET)
         self.live_order_usd = max(5.0, min(LIVE_ORDER_USD, MAX_ORDER_USD))
@@ -337,9 +391,10 @@ class ArenaState:
             self.halt_reason = f"Daily loss guardrail hit (${self.daily_loss_limit_usd:.2f})"
             self.add_log(f"LIVE TRADING HALTED: {self.halt_reason}")
 
-    def _binance_signed_request(self, method: str, path: str, params: dict) -> dict:
+    def _binance_signed_request(self, method: str, path: str, params: dict, *, futures: bool = False) -> dict:
         if not BINANCE_API_KEY or not BINANCE_API_SECRET:
             raise RuntimeError("Binance API credentials are missing")
+        base = BINANCE_FUTURES_URL if futures else BINANCE_BASE_URL
         payload = dict(params)
         payload["timestamp"] = int(time.time() * 1000)
         payload["recvWindow"] = 5000
@@ -352,13 +407,13 @@ class ArenaState:
         }
         if method == "GET":
             req = urllib.request.Request(
-                f"{BINANCE_BASE_URL}{path}?{signed_query}",
+                f"{base}{path}?{signed_query}",
                 headers=headers,
                 method="GET",
             )
         else:
             req = urllib.request.Request(
-                f"{BINANCE_BASE_URL}{path}",
+                f"{base}{path}",
                 data=signed_query.encode("utf-8"),
                 headers=headers,
                 method=method,
@@ -379,58 +434,64 @@ class ArenaState:
             except json.JSONDecodeError:
                 raise RuntimeError(f"Binance HTTP {exc.code}: {raw}") from None
 
-    def _binance_signed_get(self, path: str, params: dict) -> dict:
-        return self._binance_signed_request("GET", path, params)
+    def _binance_signed_get(self, path: str, params: dict, *, futures: bool = False) -> dict:
+        return self._binance_signed_request("GET", path, params, futures=futures)
 
-    def _binance_signed_post(self, path: str, params: dict) -> dict:
-        return self._binance_signed_request("POST", path, params)
+    def _binance_signed_post(self, path: str, params: dict, *, futures: bool = False) -> dict:
+        return self._binance_signed_request("POST", path, params, futures=futures)
 
-    def _get_spot_free_balance(self, asset: str) -> float:
-        account = self._binance_signed_get("/api/v3/account", {})
-        for row in account.get("balances", []):
-            if row.get("asset") == asset:
+    def _get_futures_usdt_balance(self) -> float:
+        """Free USDT in the USDT-M Futures wallet."""
+        rows = self._binance_signed_get("/fapi/v2/balance", {}, futures=True)
+        for row in rows:
+            if row.get("asset") == "USDT":
                 try:
-                    return float(row.get("free", "0") or 0.0)
+                    return float(row.get("availableBalance", "0") or 0.0)
                 except (TypeError, ValueError):
                     return 0.0
         return 0.0
 
     def _place_live_market_order(self, symbol: str, side: str, quote_usd: float) -> dict:
-        qty = max(5.0, min(quote_usd, self.max_order_usd))
+        """Place a USDT-M Futures market order. side='BUY'=long, 'SELL'=short."""
+        order_usd = max(5.0, min(quote_usd, self.max_order_usd))
+        price_key = _SYMBOL_PRICE_KEY.get(symbol, "btc")
+        price = self.prices.get(price_key, 1.0)
+        precision = _FUTURES_QTY_PRECISION.get(symbol, 3)
+        raw_qty = order_usd / price
+        qty = round(raw_qty, precision)
+        if qty <= 0:
+            raise RuntimeError(f"Calculated quantity {qty} for {symbol} is too small (price=${price:.2f}, order=${order_usd:.2f})")
         return self._binance_signed_post(
-            "/api/v3/order",
+            "/fapi/v1/order",
             {
                 "symbol": symbol,
                 "side": side,
                 "type": "MARKET",
-                "quoteOrderQty": f"{qty:.2f}",
+                "quantity": qty,
             },
+            futures=True,
         )
 
     def _live_order_startup_check(self) -> None:
-        """Run once at startup: verify Binance trade permission and sufficient USDT."""
+        """Run once at startup: verify Binance Futures balance and API access."""
         time.sleep(2)  # let the price feed settle first
         try:
-            account = self._binance_signed_get("/api/v3/account", {})
-            if not account.get("canTrade", False):
-                with self.lock:
-                    self.live_blocked = True
-                    self.live_blocked_reason = "Binance account cannot trade (canTrade=False)"
-                    self.add_log(f"LIVE BLOCKED: {self.live_blocked_reason}")
-                return
-            bals = {b["asset"]: float(b.get("free", 0) or 0) for b in account.get("balances", [])}
-            usdt_free = bals.get("USDT", 0.0)
+            usdt_free = self._get_futures_usdt_balance()
             if usdt_free < self.live_order_usd:
                 with self.lock:
                     self.live_blocked = True
                     self.live_blocked_reason = (
-                        f"Insufficient USDT (free ${usdt_free:.2f}, need ${self.live_order_usd:.2f} min)"
+                        f"Insufficient USDT in Futures wallet (free ${usdt_free:.2f}, "
+                        f"need ${self.live_order_usd:.2f}). Deposit USDT to your Binance Futures account."
                     )
                     self.add_log(f"LIVE BLOCKED: {self.live_blocked_reason}")
+            else:
+                with self.lock:
+                    self.add_log(f"\u2713 LIVE FUTURES READY (USDT available: ${usdt_free:.2f})")
         except Exception as exc:
             with self.lock:
                 self.live_blocked = True
-                self.live_blocked_reason = f"Binance auth check failed: {exc}"
+                self.live_blocked_reason = f"Binance Futures auth check failed: {exc}"
                 self.add_log(f"LIVE BLOCKED: {self.live_blocked_reason}")
 
     def _live_order_worker(self) -> None:
@@ -462,10 +523,6 @@ class ArenaState:
     def _execute_live_signal(self, model_name: str, desk: str, side_label: str) -> None:
         if side_label not in {"LONG", "SHORT"}:
             return
-        if side_label == "SHORT" and not ALLOW_SPOT_SHORT:
-            with self.lock:
-                self.add_log(f"{model_name} LIVE SHORT skipped (spot mode only supports safe long-by-default)")
-            return
         with self.lock:
             self._evaluate_guardrails()
             if not self.live_trading:
@@ -478,21 +535,23 @@ class ArenaState:
         if self.live_blocked:
             return  # silently skip — already logged once at block time
 
-        if side_label == "LONG":
-            required_usdt = order_usd * len(symbols)
-            try:
-                free_usdt = self._get_spot_free_balance("USDT")
-            except Exception as exc:
-                with self.lock:
-                    self.add_log(f"{model_name} LIVE precheck failed: {exc}")
-                return
-            if free_usdt + 1e-9 < required_usdt:
-                with self.lock:
-                    if not self.live_blocked:
-                        self.live_blocked = True
-                        self.live_blocked_reason = f"Insufficient USDT (need ${required_usdt:.2f}, free ${free_usdt:.2f})"
-                        self.add_log(f"LIVE BLOCKED: {self.live_blocked_reason}")
-                return
+        # Futures preflight: check available USDT balance before queuing orders
+        required_usdt = order_usd * len(symbols)
+        try:
+            free_usdt = self._get_futures_usdt_balance()
+        except Exception as exc:
+            with self.lock:
+                self.add_log(f"{model_name} LIVE precheck failed: {exc}")
+            return
+        if free_usdt + 1e-9 < required_usdt:
+            with self.lock:
+                if not self.live_blocked:
+                    self.live_blocked = True
+                    self.live_blocked_reason = (
+                        f"Insufficient USDT in Futures wallet (need ${required_usdt:.2f}, free ${free_usdt:.2f})"
+                    )
+                    self.add_log(f"LIVE BLOCKED: {self.live_blocked_reason}")
+            return
 
         for symbol in symbols:
             self.live_order_queue.put((model_name, symbol, side_label, order_usd))
@@ -636,6 +695,14 @@ class ArenaState:
             self.prices["bnb"] = prev_prices["bnb"] * (1 + ret * 0.65 + (random.random() - 0.5) * 0.0010)
 
         self.recalc_basket()
+        # Save to rolling price history (used to enrich LLM prompts)
+        self.price_history.append({
+            "btc":    self.prices["btc"],
+            "eth":    self.prices["eth"],
+            "sol":    self.prices["sol"],
+            "bnb":    self.prices["bnb"],
+            "basket": self.prices["basket"],
+        })
         # Record a price snapshot every tick for movement analysis.
         _log_movement({
             "type": "price",
@@ -717,7 +784,10 @@ class ArenaState:
                 slot["preview_pnl"] += (random.random() - 0.5) * 18
 
     def _apply_ollama_signal(self, name: str, desk_key: str, ollama_tag: str, ref_price: float) -> None:
-        action = _ollama_signal(ollama_tag, ref_price, desk_key)
+        history = list(self.price_history)  # snapshot outside lock
+        action, err = _ollama_signal(ollama_tag, ref_price, desk_key, history)
+        if err:
+            self.add_log(f"{name} [{desk_key.upper()}]: LLM error — {err} (treated as HOLD)")
         live_desk = desk_key
         live_side = "HOLD"
         with self.lock:
