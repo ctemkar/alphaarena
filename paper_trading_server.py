@@ -567,6 +567,11 @@ class ArenaState:
         floors = [self._symbol_exchange_min_notional_usd(sym) for sym in symbols]
         return min(floors) if floors else 5.0
 
+    def _global_execution_min_notional_usd(self) -> float:
+        symbols = {"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"}
+        floors = [self._symbol_min_notional_usd(sym) for sym in symbols]
+        return min(floors) if floors else 5.0
+
     def _portfolio_pnl(self) -> float:
         total = 0.0
         for m in self.models.values():
@@ -834,7 +839,12 @@ class ArenaState:
                         "price":  round(ref_price, 2),
                     })
                 if live_side in {"LONG", "SHORT"}:
-                    self._execute_live_signal(name, live_desk, live_side)
+                    executed = self._execute_live_signal(name, live_desk, live_side)
+                    if self.strict_no_simulation and self.live_trading and not executed:
+                        with self.lock:
+                            mm = self.models.get(name)
+                            if mm and mm["desk_state"][live_desk]["selected"]:
+                                self._reset_internal_slot_pnl_unlocked(mm["desk_state"][live_desk], ref_price)
             except Exception as exc:
                 with self.lock:
                     self.add_log(f"Ollama worker error: {exc}")
@@ -845,26 +855,26 @@ class ArenaState:
                 # Small delay between sequential requests prevents Ollama overload
                 time.sleep(0.1)
 
-    def _execute_live_signal(self, model_name: str, desk: str, side_label: str) -> None:
+    def _execute_live_signal(self, model_name: str, desk: str, side_label: str) -> bool:
         if side_label not in {"LONG", "SHORT"}:
-            return
+            return False
         with self.lock:
             self._evaluate_guardrails()
             if self.pause_all_desks or self.paused_desks.get(desk, False):
-                return
+                return False
             if not self.live_trading:
-                return
+                return False
             if self.require_live_feed and not self.live_feed:
-                return
+                return False
             if self.kill_switch:
-                return
+                return False
             symbols = self._desk_symbols(desk)
             total_order_usd = self.live_order_usd
 
         # Keep hard blocks for auth errors, but allow automatic recovery from
         # temporary insufficient-funds blocks once balance is sufficient.
         if self.live_blocked and "Insufficient USDT" not in self.live_blocked_reason:
-            return
+            return False
 
         # Futures preflight: read balance for diagnostics only.
         try:
@@ -872,7 +882,7 @@ class ArenaState:
         except Exception as exc:
             with self.lock:
                 self.add_log(f"{model_name} LIVE precheck failed: {exc}")
-            return
+            return False
         effective_order_usd = max(total_order_usd, 0.0)
 
         # Interpret ALPHA_LIVE_ORDER_USD as total notional per signal and
@@ -923,7 +933,7 @@ class ArenaState:
                         f"{model_name} LIVE skipped: total ${effective_order_usd:.2f} cannot satisfy any symbol min size "
                         f"({', '.join(f'{s}~${fallback_floor[s]:.2f}' for s in all_symbols)})"
                     )
-                return
+                return False
             with self.lock:
                 self.add_log(
                     f"{model_name} LIVE fallback routing: desk {desk.upper()} could not meet min size; "
@@ -951,6 +961,7 @@ class ArenaState:
                 f"{', '.join(f'{s}:${allocations[s]:.2f}' for s in allocations)} "
                 f"(total ${required_usdt:.2f})"
             )
+        return True
 
     @staticmethod
     def _mk_model(color: str, bias: float) -> dict:
@@ -1011,6 +1022,15 @@ class ArenaState:
         if new_side in {"LONG", "SHORT"} and old_side != new_side:
             slot["trade_side"] = new_side
             slot["trade_open_balance"] = slot["balance"]
+
+    def _reset_internal_slot_pnl_unlocked(self, slot: dict, ref_price: float) -> None:
+        slot["balance"] = START_BALANCE
+        slot["realized_pnl"] = 0.0
+        slot["pos"] = 0.0
+        slot["entry"] = ref_price
+        slot["mark_price"] = ref_price
+        slot["trade_side"] = "FLAT"
+        slot["trade_open_balance"] = START_BALANCE
 
     def add_log(self, message: str) -> None:
         self.logs.insert(0, f"[{now_ts()}] {message}")
@@ -1363,7 +1383,12 @@ class ArenaState:
                 "price":  round(ref_price, 2),
             })
         if live_side in {"LONG", "SHORT"}:
-            self._execute_live_signal(name, live_desk, live_side)
+            executed = self._execute_live_signal(name, live_desk, live_side)
+            if self.strict_no_simulation and self.live_trading and not executed:
+                with self.lock:
+                    mm = self.models.get(name)
+                    if mm and mm["desk_state"][live_desk]["selected"]:
+                        self._reset_internal_slot_pnl_unlocked(mm["desk_state"][live_desk], ref_price)
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -1432,6 +1457,7 @@ class ArenaState:
                     "live_blocked": self.live_blocked,
                     "live_blocked_reason": self.live_blocked_reason,
                     "order_usd": self.live_order_usd,
+                    "min_executable_order_usd": self._global_execution_min_notional_usd(),
                     "order_queue": self.live_order_queue.qsize(),
                     "auto_select_enabled": self.auto_select_enabled,
                     "auto_select_top_n": self.auto_select_top_n,

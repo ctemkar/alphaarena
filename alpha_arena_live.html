@@ -17,9 +17,6 @@
         .card h4 { margin: 0; color: #848e9c; font-size: 15px; font-weight: 400; text-transform: uppercase; letter-spacing: 0.5px; }
         .card .val { font-size: 26px; margin-top: 6px; font-weight: 500; }
         .card .sub { margin-top: 6px; font-size: 16px; line-height: 1.35; color: #b7bdc6; }
-        .pnl-compare { background:#181a20; border:1px solid #2b2f36; border-radius:10px; padding:14px; margin-bottom:16px; }
-        .pnl-compare h4 { margin:0 0 8px; color:#848e9c; font-size:15px; font-weight:400; text-transform:uppercase; letter-spacing:.5px; }
-        .pnl-compare-chart { height:180px; position:relative; }
 
         .chip-wrap { display: flex; flex-wrap: wrap; gap: 8px; }
         .chip {
@@ -144,11 +141,6 @@
         <div class="card"><h4>Daily Analytics</h4><div id="daily-summary" class="sub">Loading...</div></div>
     </div>
 
-    <div class="pnl-compare">
-        <h4>App vs Binance PnL</h4>
-        <div class="pnl-compare-chart"><canvas id="pnlCompareChart"></canvas></div>
-    </div>
-
     <div class="desks-stack">
 
         <!-- BTC-Only Desk -->
@@ -261,8 +253,8 @@
 
         let state = null;
         let lastServerStartedAt = null;
-        let btcChartBasePrice = null;
-        let basketChartBasePrice = null;
+        let btcPrevPrice = null;
+        let basketPrevPrice = null;
 
         function makeDeskChart(canvasId, label, color) {
             return new Chart(document.getElementById(canvasId).getContext('2d'), {
@@ -302,51 +294,6 @@
 
         const btcChart    = makeDeskChart('btcChart',    'BTC-Only Desk', '#f0b90b');
         const basketChart = makeDeskChart('basketChart', 'Basket Desk',   '#00ccff');
-        const pnlCompareChart = new Chart(document.getElementById('pnlCompareChart').getContext('2d'), {
-            type: 'line',
-            data: {
-                labels: [],
-                datasets: [
-                    {
-                        label: 'App PnL',
-                        borderColor: '#02c076',
-                        backgroundColor: 'transparent',
-                        data: [],
-                        tension: 0.2,
-                        pointRadius: 0,
-                        borderWidth: 2,
-                    },
-                    {
-                        label: 'Binance PnL',
-                        borderColor: '#f0b90b',
-                        backgroundColor: 'transparent',
-                        data: [],
-                        tension: 0.2,
-                        pointRadius: 0,
-                        borderWidth: 2,
-                    },
-                ],
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                animation: false,
-                plugins: {
-                    legend: { labels: { color: '#b7bdc6', boxWidth: 10, usePointStyle: true } }
-                },
-                scales: {
-                    x: { display: false },
-                    y: {
-                        grid: { color: '#2b2f36' },
-                        ticks: {
-                            color: '#848e9c',
-                            font: { size: 13 },
-                            callback: (v) => formatPnl(Number(v)),
-                        },
-                    },
-                },
-            },
-        });
 
         function pushChartPoint(chart, ts, value) {
             chart.data.labels.push(ts);
@@ -361,24 +308,6 @@
             chart.update('none');
         }
 
-        function resetPnlCompareChart() {
-            pnlCompareChart.data.labels = [];
-            pnlCompareChart.data.datasets[0].data = [];
-            pnlCompareChart.data.datasets[1].data = [];
-            pnlCompareChart.update('none');
-        }
-
-        function pushPnlComparePoint(ts, appPnl, binancePnl) {
-            pnlCompareChart.data.labels.push(ts);
-            pnlCompareChart.data.datasets[0].data.push(Number(appPnl.toFixed(2)));
-            pnlCompareChart.data.datasets[1].data.push(Number(binancePnl.toFixed(2)));
-            if (pnlCompareChart.data.labels.length > 120) {
-                pnlCompareChart.data.labels.shift();
-                pnlCompareChart.data.datasets[0].data.shift();
-                pnlCompareChart.data.datasets[1].data.shift();
-            }
-            pnlCompareChart.update('none');
-        }
 
         function pnlClass(v) { return v > 0 ? 'chip-pnl-pos' : v < 0 ? 'chip-pnl-neg' : 'chip-pnl-flat'; }
         function formatPnl(v) { const n = Number(v.toFixed(2)); return (n >= 0 ? '+' : '') + '$' + n.toLocaleString(); }
@@ -432,6 +361,15 @@
                 + ' | Margin: ' + formatPnl(margin)
                 + ' | Updated: ' + updated + binStale;
             binancePnlSubEl.style.color = '#b7bdc6';
+
+            const st = (state && state.status) ? state.status : {};
+            const cfgOrder = Number(st.order_usd || 0);
+            const minExec = Number(st.min_executable_order_usd || 0);
+            if (cfgOrder > 0 && minExec > 0 && cfgOrder + 1e-9 < minExec) {
+                binancePnlSubEl.innerText += ' | Warning: order $' + cfgOrder.toFixed(2)
+                    + ' is below executable min ~$' + minExec.toFixed(2)
+                    + ', so live signals will be skipped.';
+            }
         }
 
         function renderLlmReport(stats, ollamaModels) {
@@ -529,9 +467,8 @@
             if (s.server_started_at && lastServerStartedAt && s.server_started_at !== lastServerStartedAt) {
                 resetChart(btcChart);
                 resetChart(basketChart);
-                resetPnlCompareChart();
-                btcChartBasePrice = null;
-                basketChartBasePrice = null;
+                btcPrevPrice = null;
+                basketPrevPrice = null;
             }
             lastServerStartedAt = s.server_started_at || lastServerStartedAt;
             const models = s.models;
@@ -624,13 +561,11 @@
             const totalPnl = (typeof s.app_total_pnl_usd === 'number')
                 ? Number(s.app_total_pnl_usd)
                 : (btcPnl + basketPnl);
-            const binanceDelta = Number(((s.binance_pnl || {}).equity_delta_usd) || 0);
             applyPnlText(pnlEl, totalPnl);
             renderBinancePnl(totalPnl, s.binance_pnl || null, s.ts || null);
             renderPauseButtons(s);
             renderDailySummary(s.daily_summary || null);
             renderLlmReport(s.model_stats || {}, s.status.ollama_models || []);
-            pushPnlComparePoint(s.ts, totalPnl, binanceDelta);
 
             // Logs — filter by desk
             const btcLogs    = s.logs.filter(l => l.includes('[BTC]')    || !l.includes('[BASKET]'));
@@ -641,13 +576,15 @@
             if (strictLive) {
                 const btcPx = Number(s.prices.btc || 0);
                 const basketPx = Number(s.prices.basket || 0);
-                if (btcChartBasePrice === null) btcChartBasePrice = btcPx;
-                if (basketChartBasePrice === null) basketChartBasePrice = basketPx;
-                pushChartPoint(btcChart, s.ts, btcPx - btcChartBasePrice);
-                pushChartPoint(basketChart, s.ts, basketPx - basketChartBasePrice);
+                const btcDelta = (btcPrevPrice === null) ? 0 : (btcPx - btcPrevPrice);
+                const basketDelta = (basketPrevPrice === null) ? 0 : (basketPx - basketPrevPrice);
+                btcPrevPrice = btcPx;
+                basketPrevPrice = basketPx;
+                pushChartPoint(btcChart, s.ts, btcDelta);
+                pushChartPoint(basketChart, s.ts, basketDelta);
             } else {
-                btcChartBasePrice = null;
-                basketChartBasePrice = null;
+                btcPrevPrice = null;
+                basketPrevPrice = null;
                 pushChartPoint(btcChart, s.ts, btcPnl);
                 pushChartPoint(basketChart, s.ts, basketPnl);
             }
