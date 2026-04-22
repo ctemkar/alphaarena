@@ -126,9 +126,9 @@ STRICT_NO_SIMULATION = True
 
 AUTO_SELECT_ENABLED = os.getenv("ALPHA_AUTO_SELECT_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
 try:
-    AUTO_SELECT_TOP_N = int(os.getenv("ALPHA_AUTO_SELECT_TOP_N", "4"))
+    AUTO_SELECT_TOP_N = int(os.getenv("ALPHA_AUTO_SELECT_TOP_N", "1"))
 except ValueError:
-    AUTO_SELECT_TOP_N = 4
+    AUTO_SELECT_TOP_N = 1
 try:
     AUTO_SELECT_INTERVAL_TICKS = int(os.getenv("ALPHA_AUTO_SELECT_INTERVAL_TICKS", "5"))
 except ValueError:
@@ -170,18 +170,23 @@ try:
 except ValueError:
     AGGRESSIVE_POSITION_MULTIPLIER = 1.35
 
+# Minimum recent price move % required to allow a directional trade.
+# Below this threshold the market is too flat to overcome round-trip fees (~20 bps),
+# so all signals are suppressed to HOLD.  Override via ALPHA_MIN_TRADE_MOVE_PCT.
+try:
+    MIN_TRADE_MOVE_PCT = float(os.getenv("ALPHA_MIN_TRADE_MOVE_PCT", "0.12"))
+except ValueError:
+    MIN_TRADE_MOVE_PCT = 0.12
+
+# Minimum momentum needed to convert an AI HOLD into a directional tiebreaker.
+# Raised from 0.01 % (fires in pure noise) to 0.15 % (meaningful intra-bar move).
+MOMENTUM_OVERRIDE_THRESHOLD_PCT = 0.15
+
 # Map model name  (as it appears in ARENA_DATA) -> Ollama model tag
 OLLAMA_MODELS: dict[str, str] = {
-    "Qwen-3":          "qwen2.5-coder:latest",
-    "Qwen-2.5-Coder":  "qwen2.5-coder:latest",
-    "Qwen3-Coder":     "qwen2.5-coder:latest",
-    "DeepSeek-R1":     "deepseek-r1:8b",
-    "Gemma-4":         "gemma4:latest",
-    "Phi-3":           "mistral:latest",
-    "Llama-4":         "llama3.1:latest",
-    "Llama-3.2":       "llama3.1:latest",
-    "Mistral":         "mistral:latest",
-    "finance-llama-8b":"llama3.1:latest",
+    "Qwen-3":      "qwen2.5-coder:latest",
+    "DeepSeek-R1": "deepseek-r1:8b",
+    "Gemma-4":     "gemma4:latest",
 }
 
 
@@ -202,15 +207,16 @@ def _ollama_signal(
 
     # Build trend context from price history
     trend_lines = []
+    move_pct = 0.0
     if price_history and len(price_history) >= 2:
         prices_seq = [h[key] for h in price_history if key in h]
         if len(prices_seq) >= 2:
             oldest = prices_seq[0]
-            pct_5min = (price - oldest) / oldest * 100 if oldest else 0.0
-            direction = "up" if pct_5min > 0.01 else ("down" if pct_5min < -0.01 else "flat")
+            move_pct = (price - oldest) / oldest * 100 if oldest else 0.0
+            direction = "up" if move_pct > 0.05 else ("down" if move_pct < -0.05 else "flat")
             trend_lines.append(
                 f"Price trend over last ~{len(prices_seq) * 3}s: {direction} "
-                f"({pct_5min:+.3f}% from ${oldest:,.2f})."
+                f"({move_pct:+.3f}% from ${oldest:,.2f})."
             )
         # Tick-over-tick momentum (last 2 ticks)
         if len(prices_seq) >= 2:
@@ -218,9 +224,16 @@ def _ollama_signal(
             trend_lines.append(f"Last tick change: {tick_chg:+.4f}%.")
 
     context = " ".join(trend_lines)
+    # Add explicit profitability guidance: round-trip cost is ~20 bps so only go directional on clear moves
+    fee_hint = (
+        "Round-trip trading cost is ~0.20%. "
+        "Only go LONG or SHORT if you see a clear directional move of at least 0.15%; "
+        "otherwise reply HOLD. "
+    )
     prompt = (
         f"You are a short-term crypto trader. {asset} current price: ${price:,.2f}. "
         + (context + " " if context else "")
+        + fee_hint
         + "Based on this price action, should a short-term trader go LONG, SHORT, or HOLD? "
         "Reply with exactly one word: LONG, SHORT, or HOLD."
     )
@@ -880,20 +893,23 @@ class ArenaState:
             try:
                 history = list(self.price_history)  # snapshot outside lock
                 action, err = _ollama_signal(ollama_tag, ref_price, desk_key, history)
+                move_pct = self._desk_recent_move_pct(desk_key)
                 if err:
                     with self.lock:
                         self.add_log(f"{name} [{desk_key.upper()}]: LLM error — {err} (using momentum fallback)")
-                    # Momentum-based fallback for errors: use recent price movement to avoid HOLD
-                    move_pct = self._desk_recent_move_pct(desk_key)
-                    if abs(move_pct) >= 0.01:
+                    # Momentum-based fallback for errors: only go directional if move beats fee break-even
+                    if abs(move_pct) >= MOMENTUM_OVERRIDE_THRESHOLD_PCT:
                         action = 1 if move_pct > 0 else -1
                     else:
-                        action = 0  # Still HOLD if no clear momentum
-                # If AI is neutral (action == 0), use tiny momentum as a directional tiebreaker
+                        action = 0  # Flat market — stay HOLD
+                # If AI is neutral (action == 0), only use momentum as tiebreaker above meaningful threshold
                 elif action == 0:
-                    move_pct = self._desk_recent_move_pct(desk_key)
-                    if abs(move_pct) >= 0.01:
+                    if abs(move_pct) >= MOMENTUM_OVERRIDE_THRESHOLD_PCT:
                         action = 1 if move_pct > 0 else -1
+                # Flat-market gate: suppress directional signals when market isn't moving enough to
+                # overcome round-trip fees (~20 bps).  Forces HOLD in choppy/sideways conditions.
+                if action != 0 and abs(move_pct) < MIN_TRADE_MOVE_PCT:
+                    action = 0
                 
                 live_desk = desk_key
                 live_side = "HOLD"
@@ -1591,6 +1607,11 @@ class ArenaState:
         action, err = _ollama_signal(ollama_tag, ref_price, desk_key, history)
         if err:
             self.add_log(f"{name} [{desk_key.upper()}]: LLM error — {err} (treated as HOLD)")
+        # Flat-market gate: suppress directional signal if market isn't moving enough
+        if action != 0:
+            move_pct = self._desk_recent_move_pct(desk_key)
+            if abs(move_pct) < MIN_TRADE_MOVE_PCT:
+                action = 0
         live_desk = desk_key
         live_side = "HOLD"
         with self.lock:
