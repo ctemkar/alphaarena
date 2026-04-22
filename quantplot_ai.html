@@ -114,6 +114,19 @@
         .sig-h { background:rgba(240,185,11,.2); color:#f0b90b; }
         .sig-i { color:#444; }
 
+        .canary-panel { background:#181a20; border:1px solid #2b2f36; border-radius:10px; padding:16px; margin-bottom:16px; }
+        .canary-head { display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px; }
+        .canary-head h3 { margin:0; font-size:18px; font-weight:500; }
+        .canary-badge { font-size:14px; font-weight:600; border-radius:999px; padding:4px 10px; border:1px solid #2b2f36; }
+        .canary-badge.promote { background:#02c07622; color:#02c076; border-color:#02c07655; }
+        .canary-badge.hold { background:#f0b90b22; color:#f0b90b; border-color:#f0b90b55; }
+        .canary-meta { color:#b7bdc6; font-size:14px; margin-bottom:10px; line-height:1.35; }
+        .canary-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:10px; }
+        .canary-arm { background:#11151c; border:1px solid #2b2f36; border-radius:8px; padding:10px; }
+        .canary-arm h4 { margin:0 0 8px; font-size:14px; color:#9aa3b2; text-transform:uppercase; letter-spacing:0.5px; }
+        .canary-lines { font-size:14px; color:#d9dee6; line-height:1.45; }
+        .canary-reason { margin-top:8px; font-size:13px; color:#9aa3b2; }
+
         @media (max-width: 980px) {
             .desk-body { grid-template-columns: 1fr; }
         }
@@ -217,6 +230,25 @@
 
     </div><!-- /desks-stack -->
 
+    <div class="canary-panel" id="canary-panel" style="display:none">
+        <div class="canary-head">
+            <h3>Canary A/B: Ollama vs OpenRouter</h3>
+            <span id="canary-promo-badge" class="canary-badge hold">DO NOT PROMOTE</span>
+        </div>
+        <div id="canary-meta" class="canary-meta">Waiting for canary data...</div>
+        <div class="canary-grid">
+            <div class="canary-arm">
+                <h4>Control (Ollama)</h4>
+                <div id="canary-control" class="canary-lines">No data</div>
+            </div>
+            <div class="canary-arm">
+                <h4>Treatment (OpenRouter)</h4>
+                <div id="canary-treatment" class="canary-lines">No data</div>
+            </div>
+        </div>
+        <div id="canary-reason" class="canary-reason"></div>
+    </div>
+
     <!-- LLM Performance Report -->
     <div class="llm-report">
         <h3>&#x1F4CA; LLM Performance Report</h3>
@@ -276,6 +308,12 @@
         const msgPnlHealthBtn = document.getElementById('msg-pnl-health-btn');
         const msgSummaryBtn   = document.getElementById('msg-summary-btn');
         const messageLogEl    = document.getElementById('message-log');
+        const canaryPanelEl   = document.getElementById('canary-panel');
+        const canaryMetaEl    = document.getElementById('canary-meta');
+        const canaryControlEl = document.getElementById('canary-control');
+        const canaryTreatEl   = document.getElementById('canary-treatment');
+        const canaryReasonEl  = document.getElementById('canary-reason');
+        const canaryBadgeEl   = document.getElementById('canary-promo-badge');
 
         let state = null;
         let lastServerStartedAt = null;
@@ -337,6 +375,7 @@
 
         function pnlClass(v) { return v > 0 ? 'chip-pnl-pos' : v < 0 ? 'chip-pnl-neg' : 'chip-pnl-flat'; }
         function formatPnl(v) { const n = Number(v.toFixed(2)); return (n >= 0 ? '+' : '') + '$' + n.toLocaleString(); }
+        function formatPct(v) { return Number(v || 0).toFixed(2) + '%'; }
         function countSelected(models, desk) {
             return Object.values(models).filter(m => m.desk_state && m.desk_state[desk] && m.desk_state[desk].selected).length;
         }
@@ -519,6 +558,52 @@
                 'Trades: <strong>' + trades + '</strong> | Signals: <strong>' + signals + '</strong> | Samples: <strong>' + samples + '</strong>';
         }
 
+        function renderCanary(canary) {
+            if (!canaryPanelEl || !canaryMetaEl || !canaryControlEl || !canaryTreatEl || !canaryReasonEl || !canaryBadgeEl) return;
+            if (!canary || !canary.enabled) {
+                canaryPanelEl.style.display = 'none';
+                return;
+            }
+            canaryPanelEl.style.display = 'block';
+
+            const ctl = canary.control || {};
+            const trt = canary.treatment || {};
+            const promo = canary.promotion || {};
+            const shouldPromote = !!promo.should_promote;
+
+            canaryBadgeEl.innerText = shouldPromote ? 'PROMOTE TREATMENT' : 'DO NOT PROMOTE';
+            canaryBadgeEl.className = 'canary-badge ' + (shouldPromote ? 'promote' : 'hold');
+
+            canaryMetaEl.innerHTML =
+                'Mode: <strong>' + (canary.mode || 'n/a') + '</strong> | '
+                + 'Treatment Desk: <strong>' + (canary.treatment_desk || 'n/a') + '</strong> | '
+                + 'Model: <strong>' + (canary.treatment_model || 'n/a') + '</strong> | '
+                + 'Min Trades/Arm: <strong>' + Number(canary.min_trades || 0) + '</strong> | '
+                + 'Threshold: <strong>' + formatPct(Number(canary.promotion_threshold || 0) * 100) + '</strong>';
+
+            canaryControlEl.innerHTML =
+                'Signals: <strong>' + Number(ctl.signals || 0) + '</strong> '
+                + '(Directional <strong>' + Number(ctl.directional || 0) + '</strong>, Holds <strong>' + Number(ctl.holds || 0) + '</strong>, Errors <strong>' + Number(ctl.errors || 0) + '</strong>)<br>'
+                + 'Trades: <strong>' + Number(ctl.trades || 0) + '</strong> '
+                + '| Win Rate: <strong>' + formatPct(ctl.win_rate_pct || 0) + '</strong><br>'
+                + 'Expectancy: <strong>' + formatPnl(Number(ctl.expectancy_usd || 0)) + '</strong> '
+                + '| Net: <strong>' + formatPnl(Number(ctl.net_realized_pnl_usd || 0)) + '</strong><br>'
+                + 'Max DD: <strong>' + formatPnl(-Math.abs(Number(ctl.max_drawdown_usd || 0))) + '</strong> '
+                + '| Avg Latency: <strong>' + Number(ctl.avg_latency_ms || 0).toFixed(0) + 'ms</strong>';
+
+            canaryTreatEl.innerHTML =
+                'Signals: <strong>' + Number(trt.signals || 0) + '</strong> '
+                + '(Directional <strong>' + Number(trt.directional || 0) + '</strong>, Holds <strong>' + Number(trt.holds || 0) + '</strong>, Errors <strong>' + Number(trt.errors || 0) + '</strong>)<br>'
+                + 'Trades: <strong>' + Number(trt.trades || 0) + '</strong> '
+                + '| Win Rate: <strong>' + formatPct(trt.win_rate_pct || 0) + '</strong><br>'
+                + 'Expectancy: <strong>' + formatPnl(Number(trt.expectancy_usd || 0)) + '</strong> '
+                + '| Net: <strong>' + formatPnl(Number(trt.net_realized_pnl_usd || 0)) + '</strong><br>'
+                + 'Max DD: <strong>' + formatPnl(-Math.abs(Number(trt.max_drawdown_usd || 0))) + '</strong> '
+                + '| Avg Latency: <strong>' + Number(trt.avg_latency_ms || 0).toFixed(0) + 'ms</strong>';
+
+            canaryReasonEl.innerText = 'Decision reason: ' + (promo.reason || 'n/a');
+        }
+
         function chipHtml(name, m, pnl, ollamaModels, opts = {}) {
             const locked = !!opts.locked;
             const lockedLabel = opts.lockedLabel || '';
@@ -640,6 +725,7 @@
             renderMessageCenter(s);
             renderDailySummary(s.daily_summary || null);
             renderLlmReport(s.model_stats || {}, s.status.ollama_models || []);
+            renderCanary((s.status && s.status.canary) ? s.status.canary : null);
 
             // Logs — filter by desk
             const btcLogs    = s.logs.filter(l => l.includes('[BTC]')    || !l.includes('[BASKET]'));

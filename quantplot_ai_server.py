@@ -35,6 +35,10 @@ try:
 except ValueError:
     PUTER_REQUEST_TIMEOUT_SECONDS = 75.0
 try:
+    OPENROUTER_REQUEST_TIMEOUT_SECONDS = float(os.getenv("ALPHA_OPENROUTER_TIMEOUT_SECONDS", "45"))
+except ValueError:
+    OPENROUTER_REQUEST_TIMEOUT_SECONDS = 45.0
+try:
     OLLAMA_NUM_WORKERS = int(os.getenv("ALPHA_OLLAMA_NUM_WORKERS", "3"))
 except ValueError:
     OLLAMA_NUM_WORKERS = 3
@@ -84,6 +88,8 @@ _load_dotenv()
 BINANCE_API_KEY = os.getenv("EXCH_BINANCE_API_KEY", "") or os.getenv("BINANCE_KEY", "")
 BINANCE_API_SECRET = os.getenv("EXCH_BINANCE_API_SECRET", "") or os.getenv("BINANCE_SECRET", "")
 PUTER_AUTH_TOKEN = os.getenv("PUTER_AUTH_TOKEN", "") or os.getenv("puterAuthToken", "")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "") or os.getenv("ALPHA_OPENROUTER_API_KEY", "")
+OPENROUTER_URL = os.getenv("ALPHA_OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
 LIVE_TRADING_ENABLED = os.getenv("ALPHA_LIVE_TRADING", "0").strip().lower() in {"1", "true", "yes", "on"}
 USE_FUTURES = os.getenv("ALPHA_USE_FUTURES", "1").strip().lower() not in {"0", "false", "no", "off"}
 try:
@@ -197,6 +203,24 @@ except ValueError:
 
 DISABLE_GROK_AUTO_SELECT = os.getenv("ALPHA_DISABLE_GROK_AUTO_SELECT", "1").strip().lower() in {"1", "true", "yes", "on"}
 
+CANARY_ENABLED = os.getenv("ALPHA_CANARY_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+CANARY_MODE = os.getenv("ALPHA_CANARY_MODE", "desk").strip().lower()  # desk | ratio
+CANARY_CONTROL_DESK = os.getenv("ALPHA_CANARY_CONTROL_DESK", "btc").strip().lower()
+CANARY_TREATMENT_DESK = os.getenv("ALPHA_CANARY_TREATMENT_DESK", "basket").strip().lower()
+try:
+    CANARY_TREATMENT_RATIO = float(os.getenv("ALPHA_CANARY_TREATMENT_RATIO", "0.25"))
+except ValueError:
+    CANARY_TREATMENT_RATIO = 0.25
+OPENROUTER_CANARY_MODEL = os.getenv("ALPHA_OPENROUTER_CANARY_MODEL", "openai/gpt-4o-mini").strip()
+try:
+    CANARY_PROMOTION_THRESHOLD = float(os.getenv("ALPHA_CANARY_PROMOTION_THRESHOLD", "0.12"))
+except ValueError:
+    CANARY_PROMOTION_THRESHOLD = 0.12
+try:
+    CANARY_MIN_TRADES = int(os.getenv("ALPHA_CANARY_MIN_TRADES", "20"))
+except ValueError:
+    CANARY_MIN_TRADES = 20
+
 # Map model name to the backing LLM target. Most are Ollama tags; Puter-backed
 # models use the `puter:` prefix and are resolved through the local JS helper.
 OLLAMA_MODELS: dict[str, str] = {
@@ -280,6 +304,43 @@ def _puter_signal(model_tag: str, prompt: str) -> tuple[int, str]:
     return _parse_signal_text(result.stdout), ""
 
 
+def _openrouter_signal(model_tag: str, prompt: str) -> tuple[int, str]:
+    if not OPENROUTER_API_KEY:
+        return 0, "openrouter api key missing"
+    payload = json.dumps({
+        "model": model_tag,
+        "messages": [
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0,
+        "max_tokens": 6,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        OPENROUTER_URL,
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=OPENROUTER_REQUEST_TIMEOUT_SECONDS) as resp:
+            result = json.loads(resp.read().decode())
+            choices = result.get("choices") or []
+            if not choices:
+                return 0, "openrouter empty choices"
+            msg = choices[0].get("message") or {}
+            text = msg.get("content", "")
+            return _parse_signal_text(text), ""
+    except urllib.error.URLError as exc:
+        return 0, f"network: {exc.reason}"
+    except TimeoutError:
+        return 0, "timeout"
+    except Exception as exc:
+        return 0, str(exc)[:120]
+
+
 def _ollama_signal(
     ollama_tag: str,
     price: float,
@@ -295,6 +356,8 @@ def _ollama_signal(
     prompt = _signal_prompt(price, desk, price_history)
     if ollama_tag.startswith("puter:"):
         return _puter_signal(ollama_tag.split(":", 1)[1], prompt)
+    if ollama_tag.startswith("openrouter:"):
+        return _openrouter_signal(ollama_tag.split(":", 1)[1], prompt)
     payload = json.dumps({"model": ollama_tag, "prompt": prompt, "stream": False}).encode()
     req = urllib.request.Request(
         f"{OLLAMA_URL}/api/generate",
@@ -390,7 +453,7 @@ class ArenaState:
         self.live_blocked = False       # True once a 401/403 from Binance is seen
         self.live_blocked_reason = ""  # human-readable reason
         self.guardrail_day = datetime.utcnow().strftime("%Y-%m-%d")
-        self.live_order_queue: queue.Queue[tuple[str, str, str, str, float]] = queue.Queue()
+        self.live_order_queue: queue.Queue[tuple[str, str, str, str, float, str, str]] = queue.Queue()
         # Live fill ledger: keyed by (model_name, desk, symbol)
         self.live_ledger: dict[tuple[str, str, str], dict] = {}
         # Binance position cache from /fapi/v2/positionRisk
@@ -437,6 +500,46 @@ class ArenaState:
         self.last_live_entry_tick_global = -1
         self.last_live_symbol_side_ts: dict[tuple[str, str], float] = {}
         self.last_live_symbol_ts: dict[str, float] = {}
+        self.openrouter_canary_model = OPENROUTER_CANARY_MODEL
+        self.canary_enabled = bool(CANARY_ENABLED and OPENROUTER_API_KEY and self.openrouter_canary_model)
+        self.canary_mode = CANARY_MODE if CANARY_MODE in {"desk", "ratio"} else "desk"
+        self.canary_control_desk = CANARY_CONTROL_DESK if CANARY_CONTROL_DESK in {"btc", "basket"} else "btc"
+        self.canary_treatment_desk = CANARY_TREATMENT_DESK if CANARY_TREATMENT_DESK in {"btc", "basket"} else "basket"
+        self.canary_treatment_ratio = min(max(CANARY_TREATMENT_RATIO, 0.0), 1.0)
+        self.canary_promotion_threshold = max(0.0, CANARY_PROMOTION_THRESHOLD)
+        self.canary_min_trades = max(1, CANARY_MIN_TRADES)
+        self.canary_stats = {
+            "control": {
+                "signals": 0,
+                "directional": 0,
+                "holds": 0,
+                "errors": 0,
+                "latency_ms_total": 0.0,
+                "latency_samples": 0,
+                "trades": 0,
+                "wins": 0,
+                "losses": 0,
+                "net_realized_pnl": 0.0,
+                "equity": 0.0,
+                "peak_equity": 0.0,
+                "max_drawdown_usd": 0.0,
+            },
+            "treatment": {
+                "signals": 0,
+                "directional": 0,
+                "holds": 0,
+                "errors": 0,
+                "latency_ms_total": 0.0,
+                "latency_samples": 0,
+                "trades": 0,
+                "wins": 0,
+                "losses": 0,
+                "net_realized_pnl": 0.0,
+                "equity": 0.0,
+                "peak_equity": 0.0,
+                "max_drawdown_usd": 0.0,
+            },
+        }
         self.logs = []
         self.message_center: list[str] = []
         self.away_mode = False
@@ -906,7 +1009,16 @@ class ArenaState:
             futures=True,
         )
 
-    def _record_live_fill(self, model_name: str, desk: str, symbol: str, side_label: str, avg_price: float, executed_qty: float) -> None:
+    def _record_live_fill(
+        self,
+        model_name: str,
+        desk: str,
+        symbol: str,
+        side_label: str,
+        avg_price: float,
+        executed_qty: float,
+        signal_arm: str,
+    ) -> None:
         """Record a live fill and compute realized P&L. Must be called under self.lock."""
         key = (model_name, desk, symbol)
         if key not in self.live_ledger:
@@ -937,6 +1049,9 @@ class ArenaState:
             else:
                 pnl = (L["avg_entry"] - avg_price) * close_qty
             L["realized_pnl"] += pnl
+            est_cost = close_qty * avg_price * ((ANALYTICS_FEE_BPS + ANALYTICS_SLIPPAGE_BPS) / 10000.0)
+            net_pnl = pnl - est_cost
+            self._canary_on_realized_trade(signal_arm, net_pnl)
             if pnl > 0:
                 L["wins"] += 1
             elif pnl < 0:
@@ -1000,6 +1115,103 @@ class ArenaState:
             providers[GROK_MODEL_NAME] = GROK_MODEL_TAG
         return providers
 
+    def _canary_arm_for_desk(self, desk: str) -> str:
+        if not self.canary_enabled or not OPENROUTER_API_KEY or not self.openrouter_canary_model:
+            return "control"
+        if self.canary_mode == "desk":
+            return "treatment" if desk == self.canary_treatment_desk else "control"
+        if self.canary_mode == "ratio":
+            return "treatment" if random.random() < self.canary_treatment_ratio else "control"
+        return "control"
+
+    def _resolve_signal_target(self, name: str, desk: str, default_tag: str) -> tuple[str, str, str]:
+        arm = self._canary_arm_for_desk(desk)
+        if arm == "treatment":
+            return f"openrouter:{self.openrouter_canary_model}", "treatment", f"openrouter:{self.openrouter_canary_model}"
+        return default_tag, "control", default_tag
+
+    def _canary_on_signal(self, arm: str, signal: str, latency_ms: float, had_error: bool) -> None:
+        stats = self.canary_stats.get(arm)
+        if not stats:
+            return
+        stats["signals"] += 1
+        stats["latency_ms_total"] += max(0.0, latency_ms)
+        stats["latency_samples"] += 1
+        if signal in {"LONG", "SHORT"}:
+            stats["directional"] += 1
+        else:
+            stats["holds"] += 1
+        if had_error:
+            stats["errors"] += 1
+
+    def _canary_on_realized_trade(self, arm: str, net_pnl: float) -> None:
+        stats = self.canary_stats.get(arm)
+        if not stats:
+            return
+        stats["trades"] += 1
+        stats["net_realized_pnl"] += net_pnl
+        stats["equity"] += net_pnl
+        if net_pnl > 0:
+            stats["wins"] += 1
+        elif net_pnl < 0:
+            stats["losses"] += 1
+        if stats["equity"] > stats["peak_equity"]:
+            stats["peak_equity"] = stats["equity"]
+        dd = stats["peak_equity"] - stats["equity"]
+        if dd > stats["max_drawdown_usd"]:
+            stats["max_drawdown_usd"] = dd
+
+    def _canary_summary(self) -> dict:
+        summary: dict[str, dict | str | bool | float | int] = {
+            "enabled": bool(self.canary_enabled),
+            "mode": self.canary_mode,
+            "treatment_desk": self.canary_treatment_desk,
+            "treatment_ratio": self.canary_treatment_ratio,
+            "treatment_model": self.openrouter_canary_model,
+            "promotion_threshold": self.canary_promotion_threshold,
+            "min_trades": self.canary_min_trades,
+        }
+        for arm in ("control", "treatment"):
+            s = self.canary_stats[arm]
+            trades = int(s["trades"])
+            decisions = int(s["wins"] + s["losses"])
+            summary[arm] = {
+                "signals": int(s["signals"]),
+                "directional": int(s["directional"]),
+                "holds": int(s["holds"]),
+                "errors": int(s["errors"]),
+                "avg_latency_ms": round((s["latency_ms_total"] / s["latency_samples"]) if s["latency_samples"] else 0.0, 2),
+                "trades": trades,
+                "wins": int(s["wins"]),
+                "losses": int(s["losses"]),
+                "win_rate_pct": round((100.0 * s["wins"] / decisions) if decisions else 0.0, 2),
+                "expectancy_usd": round((s["net_realized_pnl"] / trades) if trades else 0.0, 4),
+                "net_realized_pnl_usd": round(s["net_realized_pnl"], 4),
+                "max_drawdown_usd": round(s["max_drawdown_usd"], 4),
+            }
+
+        ctl = summary["control"]
+        trt = summary["treatment"]
+        promote = False
+        reason = "insufficient data"
+        if trt["trades"] >= self.canary_min_trades and ctl["trades"] >= self.canary_min_trades:
+            ctl_exp = float(ctl["expectancy_usd"])
+            trt_exp = float(trt["expectancy_usd"])
+            exp_delta = trt_exp - ctl_exp
+            base = max(abs(ctl_exp), 1e-9)
+            exp_lift = exp_delta / base
+            dd_ok = float(trt["max_drawdown_usd"]) <= float(ctl["max_drawdown_usd"])
+            promote = exp_lift >= self.canary_promotion_threshold and dd_ok
+            reason = (
+                f"exp_lift={exp_lift:.3f}, ctl_exp={ctl_exp:.4f}, trt_exp={trt_exp:.4f}, "
+                f"ctl_dd={float(ctl['max_drawdown_usd']):.2f}, trt_dd={float(trt['max_drawdown_usd']):.2f}"
+            )
+        summary["promotion"] = {
+            "should_promote": promote,
+            "reason": reason,
+        }
+        return summary
+
     def set_puter_auth_token(self, token: str) -> bool:
         token = (token or "").strip()
         if token == self.puter_auth_token:
@@ -1049,7 +1261,7 @@ class ArenaState:
     def _live_order_worker(self) -> None:
         """Executes live orders sequentially to avoid parallel request bursts."""
         while True:
-            model_name, desk, symbol, side_label, order_usd = self.live_order_queue.get()
+            model_name, desk, symbol, side_label, order_usd, signal_arm, signal_provider = self.live_order_queue.get()
             try:
                 side = "BUY" if side_label == "LONG" else "SELL"
                 result = self._place_live_market_order(symbol, side, order_usd)
@@ -1068,9 +1280,12 @@ class ArenaState:
                 if cum_quote <= 0 and executed_qty > 0 and avg_price > 0:
                     cum_quote = executed_qty * avg_price
                 with self.lock:
-                    self.add_log(f"{model_name} LIVE {symbol} {side_label} ${cum_quote:.2f} @ {avg_price:.4f} (order {order_id})")
+                    self.add_log(
+                        f"{model_name} LIVE {symbol} {side_label} ${cum_quote:.2f} @ {avg_price:.4f} "
+                        f"(order {order_id}, arm={signal_arm}, provider={signal_provider})"
+                    )
                     if avg_price > 0 and executed_qty > 0:
-                        self._record_live_fill(model_name, desk, symbol, side_label, avg_price, executed_qty)
+                        self._record_live_fill(model_name, desk, symbol, side_label, avg_price, executed_qty, signal_arm)
             except Exception as exc:
                 err_str = str(exc)
                 with self.lock:
@@ -1094,11 +1309,17 @@ class ArenaState:
             pending_key = (name, desk_key)
             try:
                 history = list(self.price_history)  # snapshot outside lock
-                action, err = _ollama_signal(ollama_tag, ref_price, desk_key, history)
+                resolved_tag, signal_arm, signal_provider = self._resolve_signal_target(name, desk_key, ollama_tag)
+                started = time.perf_counter()
+                action, err = _ollama_signal(resolved_tag, ref_price, desk_key, history)
+                latency_ms = (time.perf_counter() - started) * 1000.0
                 move_pct = self._desk_recent_move_pct(desk_key)
                 if err:
                     with self.lock:
-                        self.add_log(f"{name} [{desk_key.upper()}]: LLM error — {err} (using momentum fallback)")
+                        self.add_log(
+                            f"{name} [{desk_key.upper()}]: LLM error — {err} "
+                            f"(provider={signal_provider}, arm={signal_arm}, using momentum fallback)"
+                        )
                     # Momentum-based fallback for errors: only go directional if move beats fee break-even
                     if abs(move_pct) >= MOMENTUM_OVERRIDE_THRESHOLD_PCT:
                         action = 1 if move_pct > 0 else -1
@@ -1167,17 +1388,30 @@ class ArenaState:
                             self._roll_trade_on_signal(name, desk_key, slot, side, ref_price, "signal_flip")
                     desk = desk_key.upper()
                     live_side = side
-                    self.add_log(f"{name} [{desk}]: {side} @ ${ref_price:,.2f} [AI]")
+                    self._canary_on_signal(signal_arm, side, latency_ms, bool(err))
+                    self.add_log(
+                        f"{name} [{desk}]: {side} @ ${ref_price:,.2f} [AI] "
+                        f"(provider={signal_provider}, arm={signal_arm}, latency={latency_ms:.1f}ms)"
+                    )
                     _log_movement({
                         "type":   "signal",
                         "model":  name,
                         "desk":   live_desk,
                         "signal": side,
                         "source": "ai",
+                        "provider": signal_provider,
+                        "arm": signal_arm,
+                        "latency_ms": round(latency_ms, 2),
                         "price":  round(ref_price, 2),
                     })
                 if live_side in {"LONG", "SHORT"}:
-                    executed = self._execute_live_signal(name, live_desk, live_side)
+                    executed = self._execute_live_signal(
+                        name,
+                        live_desk,
+                        live_side,
+                        signal_arm=signal_arm,
+                        signal_provider=signal_provider,
+                    )
                     if self.strict_no_simulation and self.live_trading and not executed:
                         with self.lock:
                             mm = self.models.get(name)
@@ -1193,7 +1427,14 @@ class ArenaState:
                 # Small delay between sequential requests prevents Ollama overload
                 time.sleep(0.1)
 
-    def _execute_live_signal(self, model_name: str, desk: str, side_label: str) -> bool:
+    def _execute_live_signal(
+        self,
+        model_name: str,
+        desk: str,
+        side_label: str,
+        signal_arm: str = "control",
+        signal_provider: str = "",
+    ) -> bool:
         if side_label not in {"LONG", "SHORT"}:
             return False
         with self.lock:
@@ -1323,7 +1564,7 @@ class ArenaState:
                 )
 
         for symbol, order_usd in allocations.items():
-            self.live_order_queue.put((model_name, desk, symbol, side_label, order_usd))
+            self.live_order_queue.put((model_name, desk, symbol, side_label, order_usd, signal_arm, signal_provider))
         with self.lock:
             self.last_live_entry_tick_by_desk[desk] = self.tick_count
             self.last_live_entry_tick_global = self.tick_count
@@ -2031,6 +2272,7 @@ class ArenaState:
                     "aggressive_now_basket": self._is_aggressive_movement("basket"),
                     "ollama_models": list(self._model_provider_map().keys()),
                     "puter_grok_enabled": bool(self.puter_auth_token),
+                    "canary": self._canary_summary(),
                 },
                 "desk_equity": {
                     "btc": btc_equity,
