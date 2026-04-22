@@ -137,6 +137,7 @@ try:
     HOLD_REPLACE_STREAK = int(os.getenv("ALPHA_HOLD_REPLACE_STREAK", "5"))
 except ValueError:
     HOLD_REPLACE_STREAK = 5
+SKIP_SELECTED_HOLD_ON_SIGNAL = os.getenv("ALPHA_SKIP_SELECTED_HOLD_ON_SIGNAL", "1").strip().lower() in {"1", "true", "yes", "on"}
 try:
     HOLD_SCORE_PENALTY = float(os.getenv("ALPHA_HOLD_SCORE_PENALTY", "8.0"))
 except ValueError:
@@ -363,6 +364,7 @@ class ArenaState:
         self.auto_select_interval_ticks = max(5, AUTO_SELECT_INTERVAL_TICKS)
         self.auto_select_round = 0
         self.hold_replace_streak = max(1, HOLD_REPLACE_STREAK)
+        self.skip_selected_hold_on_signal = SKIP_SELECTED_HOLD_ON_SIGNAL
         self.hold_score_penalty = max(0.0, HOLD_SCORE_PENALTY)
         self.base_signal_chance = min(max(BASE_SIGNAL_CHANCE, 0.01), 0.95)
         self.aggressive_movement_enabled = AGGRESSIVE_MOVEMENT_ENABLED
@@ -1032,7 +1034,10 @@ class ArenaState:
                         self._close_trade_if_open(name, desk_key, slot, "hold_signal", ref_price)
                         slot["pos"] = 0.0
                         # Immediately trigger auto-select to replace this HOLD model
-                        if self.auto_select_enabled and slot["hold_streak"] >= self.hold_replace_streak:
+                        if self.auto_select_enabled and (
+                            self.skip_selected_hold_on_signal
+                            or slot["hold_streak"] >= self.hold_replace_streak
+                        ):
                             self._auto_select_models()
                     else:
                         slot["hold_streak"] = 0
@@ -1491,7 +1496,12 @@ class ArenaState:
             forced_rotate: set[str] = set()
             for nm in self.models.keys():
                 slot = self.models[nm]["desk_state"][desk]
-                if slot.get("selected") and int(slot.get("hold_streak", 0)) >= self.hold_replace_streak:
+                if not slot.get("selected"):
+                    continue
+                if self.skip_selected_hold_on_signal and slot.get("last_signal") == "HOLD":
+                    forced_rotate.add(nm)
+                    continue
+                if int(slot.get("hold_streak", 0)) >= self.hold_replace_streak:
                     forced_rotate.add(nm)
             ranked = sorted(
                 model_names,
@@ -1856,6 +1866,7 @@ class ArenaState:
                     "auto_select_enabled": self.auto_select_enabled,
                     "auto_select_top_n": self.auto_select_top_n,
                     "auto_select_interval_ticks": self.auto_select_interval_ticks,
+                    "skip_selected_hold_on_signal": self.skip_selected_hold_on_signal,
                     "pause_all_desks": self.pause_all_desks,
                     "profit_lock_enabled": self.profit_lock_enabled,
                     "profit_lock_usd": self.profit_lock_usd,
