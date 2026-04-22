@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Alpha Arena AI Trading Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: -apple-system, system-ui, sans-serif; background: #0b0e11; color: #eaecef; margin: 0; padding: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #2b2f36; padding-bottom: 20px; margin-bottom: 20px; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 15px; margin-bottom: 25px; }
+        .card { background: #181a20; padding: 20px; border-radius: 8px; border: 1px solid #2b2f36; }
+        .card h3 { margin: 0; font-size: 14px; color: #848e9c; text-transform: uppercase; }
+        .card .value { font-size: 24px; font-weight: bold; margin: 10px 0; }
+        .green { color: #02c076; }
+        .red { color: #f84960; }
+        .chart-box { background: #181a20; border-radius: 8px; padding: 20px; border: 1px solid #2b2f36; height: 450px; }
+        .table-box { margin-top: 25px; background: #181a20; border-radius: 8px; overflow: hidden; border: 1px solid #2b2f36; }
+        table { width: 100%; border-collapse: collapse; }
+        th { background: #2b2f36; color: #848e9c; text-align: left; padding: 12px; font-size: 12px; }
+        td { padding: 15px 12px; border-top: 1px solid #2b2f36; font-size: 14px; }
+        .badge { padding: 4px 8px; border-radius: 4px; font-size: 11px; background: #2b2f36; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Alpha Arena <span style="color: #f0b90b;">S1 Results</span></h1>
+            <div id="clock" class="badge">Live Progress Tracking</div>
+        </div>
+
+        <div class="stats-grid">
+            <div class="card"><h3>Total Prize Pool</h3><div class="value">$60,000</div></div>
+            <div class="card"><h3>Active Agents</h3><div class="value">4</div></div>
+            <div class="card"><h3>Winner ROI</h3><div class="value green">+22.31%</div></div>
+            <div class="card"><h3>Max Drawdown</h3><div class="value red">-42.5%</div></div>
+        </div>
+
+        <div class="chart-box">
+            <canvas id="liveChart"></canvas>
+        </div>
+
+        <div class="table-box">
+            <table>
+                <thead>
+                    <tr>
+                        <th>RANK</th>
+                        <th>MODEL NAME</th>
+                        <th>FINAL BALANCE</th>
+                        <th>ROI (%)</th>
+                        <th>STATUS</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td>1</td><td><strong>Qwen 3 Max</strong></td><td>$12,231.82</td><td class="green">+22.3%</td><td><span class="badge">COMPLETED</span></td></tr>
+                    <tr><td>2</td><td><strong>DeepSeek V3.1</strong></td><td>$10,489.00</td><td class="green">+4.8%</td><td><span class="badge">COMPLETED</span></td></tr>
+                    <tr><td>3</td><td><strong>Claude 4.5 Sonnet</strong></td><td>$7,296.00</td><td class="red">-27.0%</td><td><span class="badge">COMPLETED</span></td></tr>
+                    <tr><td>4</td><td><strong>GPT-5</strong></td><td>$4,126.00</td><td class="red">-62.6%</td><td><span class="badge">COMPLETED</span></td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        const ctx = document.getElementById('liveChart').getContext('2d');
+        let minutes = Array.from({length: 60}, (_, i) => i + "m");
+        
+        const data = {
+            labels: minutes,
+            datasets: [
+                {
+                    label: 'Qwen 3 Max (Winner)',
+                    borderColor: '#02c076',
+                    data: [10000, 10100, 10050, 10200, 10400, 10300, 10600, 11000, 11500, 11200, 11800, 12231],
+                    fill: false,
+                    tension: 0.4
+                },
+                {
+                    label: 'DeepSeek V3.1',
+                    borderColor: '#4eafef',
+                    data: [10000, 9900, 10100, 10050, 10200, 10150, 10300, 10400, 10450, 10500, 10489],
+                    fill: false,
+                    tension: 0.4
+                }
+            ]
+        };
+
+        const config = {
+            type: 'line',
+            data: data,
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { position: 'top', labels: { color: '#848e9c' } } },
+                scales: {
+                    x: { grid: { color: '#2b2f36' }, ticks: { color: '#848e9c' } },
+                    y: { grid: { color: '#2b2f36' }, ticks: { color: '#848e9c' } }
+                }
+            }
+        };
+
+        const liveChart = new Chart(ctx, config);
+
+        setInterval(() => {
+            const now = new Date();
+            document.getElementById('clock').innerText = 'System Time: ' + now.toLocaleTimeString();
+        }, 1000);
+    </script>
+</body>
+</html>
