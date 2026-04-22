@@ -672,9 +672,13 @@
             // Split models into groups
             const btcSelected    = names.filter(n => models[n].desk_state && models[n].desk_state.btc && models[n].desk_state.btc.selected);
             const basketSelected = names.filter(n => models[n].desk_state && models[n].desk_state.basket && models[n].desk_state.basket.selected);
-            const totalPnl = (typeof s.app_total_pnl_usd === 'number')
+            const appLedgerPnl = (typeof s.app_total_pnl_usd === 'number')
                 ? Number(s.app_total_pnl_usd)
                 : (btcPnl + basketPnl);
+            const strictLiveMode = !!(s.status && s.status.no_simulation && s.status.mode === 'LIVE');
+            const binanceEquityDelta = Number(((s.binance_pnl || {}).equity_delta_usd) || 0);
+            const hasBinancePnl = !!(s.binance_pnl && s.binance_pnl.available);
+            const totalPnl = (strictLiveMode && hasBinancePnl) ? binanceEquityDelta : appLedgerPnl;
 
             // Available pools — show ALL models in BOTH desks.
             // Lock only if selected in the SAME desk (desks are independent).
@@ -720,7 +724,7 @@
             activeModelsEl.innerText = String(btcSelected.length + basketSelected.length);
 
             applyPnlText(pnlEl, totalPnl);
-            renderBinancePnl(totalPnl, s.binance_pnl || null, s.ts || null);
+            renderBinancePnl(appLedgerPnl, s.binance_pnl || null, s.ts || null);
             renderPauseButtons(s);
             renderMessageCenter(s);
             renderDailySummary(s.daily_summary || null);

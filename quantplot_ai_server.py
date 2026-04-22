@@ -2245,6 +2245,8 @@ class ArenaState:
                     "live_blocked": self.live_blocked,
                     "live_blocked_reason": self.live_blocked_reason,
                     "order_usd": self.live_order_usd,
+                    "max_order_usd": self.max_order_usd,
+                    "daily_loss_limit_usd": self.daily_loss_limit_usd,
                     "min_executable_order_usd": self._global_execution_min_notional_usd(),
                     "allow_cross_symbol_fallback": self.allow_cross_symbol_fallback,
                     "one_live_entry_per_desk_per_tick": self.one_live_entry_per_desk_per_tick,
