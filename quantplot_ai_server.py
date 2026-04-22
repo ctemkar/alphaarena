@@ -1109,6 +1109,92 @@ class ArenaState:
         except Exception:
             pass  # non-fatal; stale data is acceptable
 
+    def flatten_all_futures_positions(self) -> dict:
+        """Reduce-only market-close all open USDT-M futures positions."""
+        if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+            return {"ok": False, "error": "Binance credentials missing"}
+
+        try:
+            positions = self._binance_signed_get("/fapi/v2/positionRisk", {}, futures=True)
+        except Exception as exc:
+            return {"ok": False, "error": f"position fetch failed: {exc}"}
+
+        actions: list[dict] = []
+        errors: list[dict] = []
+        attempted = 0
+
+        for p in positions:
+            symbol = str(p.get("symbol", "") or "")
+            if not symbol:
+                continue
+            try:
+                position_amt = float(p.get("positionAmt", "0") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if abs(position_amt) <= 1e-12:
+                continue
+
+            side = "SELL" if position_amt > 0 else "BUY"
+            precision = _FUTURES_QTY_PRECISION.get(symbol, 3)
+            factor = 10 ** precision
+            qty = math.floor(abs(position_amt) * factor) / factor
+            if qty <= 0:
+                errors.append({
+                    "symbol": symbol,
+                    "error": f"quantity rounded to 0 (positionAmt={position_amt})",
+                })
+                continue
+
+            params = {
+                "symbol": symbol,
+                "side": side,
+                "type": "MARKET",
+                "quantity": qty,
+                "newOrderRespType": "RESULT",
+                "reduceOnly": "true",
+            }
+            position_side = str(p.get("positionSide", "") or "").upper()
+            if position_side in {"LONG", "SHORT"}:
+                # Hedge mode: positionSide is required, reduceOnly may be rejected.
+                params["positionSide"] = position_side
+                params.pop("reduceOnly", None)
+
+            attempted += 1
+            try:
+                result = self._binance_signed_post("/fapi/v1/order", params, futures=True)
+                actions.append({
+                    "symbol": symbol,
+                    "side": side,
+                    "qty": qty,
+                    "orderId": result.get("orderId"),
+                    "status": result.get("status"),
+                })
+            except Exception as exc:
+                errors.append({
+                    "symbol": symbol,
+                    "side": side,
+                    "qty": qty,
+                    "error": str(exc),
+                })
+
+        with self.lock:
+            # Force-refresh caches after flatten attempt.
+            self.live_positions_last_refresh = 0.0
+            self.binance_pnl_last_refresh = 0.0
+            self._refresh_binance_positions_if_due()
+            self._refresh_binance_pnl_if_due()
+            self.add_log(
+                f"FLATTEN FUTURES: attempted={attempted}, success={len(actions)}, errors={len(errors)}"
+            )
+
+        return {
+            "ok": len(errors) == 0,
+            "attempted": attempted,
+            "success": len(actions),
+            "errors": errors,
+            "orders": actions,
+        }
+
     def _model_provider_map(self) -> dict[str, str]:
         providers = dict(OLLAMA_MODELS)
         if self.puter_auth_token:
@@ -2343,6 +2429,7 @@ class ArenaHandler(SimpleHTTPRequestHandler):
             "/api/select",
             "/api/deselect",
             "/api/pause",
+            "/api/flatten-futures",
             "/api/store/backup",
             "/api/store/purge",
             "/api/auto-select",
@@ -2371,6 +2458,12 @@ class ArenaHandler(SimpleHTTPRequestHandler):
             backup_first = data.get("backup_first", True)
             info = self.state.purge_stores(bool(backup_first))
             self._json(200, info)
+            return
+
+        if self.path == "/api/flatten-futures":
+            result = self.state.flatten_all_futures_positions()
+            code = 200 if result.get("ok") else 500
+            self._json(code, result)
             return
 
         if self.path == "/api/pause":
