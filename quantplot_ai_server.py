@@ -134,17 +134,17 @@ try:
 except ValueError:
     AUTO_SELECT_INTERVAL_TICKS = 20
 try:
-    HOLD_REPLACE_STREAK = int(os.getenv("ALPHA_HOLD_REPLACE_STREAK", "1"))
+    HOLD_REPLACE_STREAK = int(os.getenv("ALPHA_HOLD_REPLACE_STREAK", "5"))
 except ValueError:
-    HOLD_REPLACE_STREAK = 2
+    HOLD_REPLACE_STREAK = 5
 try:
     HOLD_SCORE_PENALTY = float(os.getenv("ALPHA_HOLD_SCORE_PENALTY", "8.0"))
 except ValueError:
     HOLD_SCORE_PENALTY = 8.0
 try:
-    BASE_SIGNAL_CHANCE = float(os.getenv("ALPHA_BASE_SIGNAL_CHANCE", "0.08"))
+    BASE_SIGNAL_CHANCE = float(os.getenv("ALPHA_BASE_SIGNAL_CHANCE", "0.30"))
 except ValueError:
-    BASE_SIGNAL_CHANCE = 0.08
+    BASE_SIGNAL_CHANCE = 0.30
 
 AGGRESSIVE_MOVEMENT_ENABLED = os.getenv("ALPHA_AGGRESSIVE_MOVEMENT_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
 ONE_LIVE_ENTRY_PER_DESK_PER_TICK = os.getenv("ALPHA_ONE_LIVE_ENTRY_PER_DESK_PER_TICK", "1").strip().lower() in {"1", "true", "yes", "on"}
@@ -174,18 +174,17 @@ except ValueError:
 # Below this threshold the market is too flat to overcome round-trip fees (~20 bps),
 # so all signals are suppressed to HOLD.  Override via ALPHA_MIN_TRADE_MOVE_PCT.
 try:
-    MIN_TRADE_MOVE_PCT = float(os.getenv("ALPHA_MIN_TRADE_MOVE_PCT", "0.12"))
+    MIN_TRADE_MOVE_PCT = float(os.getenv("ALPHA_MIN_TRADE_MOVE_PCT", "0.04"))
 except ValueError:
-    MIN_TRADE_MOVE_PCT = 0.12
+    MIN_TRADE_MOVE_PCT = 0.04
 
 # Minimum momentum needed to convert an AI HOLD into a directional tiebreaker.
-# Raised from 0.01 % (fires in pure noise) to 0.15 % (meaningful intra-bar move).
-MOMENTUM_OVERRIDE_THRESHOLD_PCT = 0.15
+MOMENTUM_OVERRIDE_THRESHOLD_PCT = 0.05
 
 # Map model name  (as it appears in ARENA_DATA) -> Ollama model tag
 OLLAMA_MODELS: dict[str, str] = {
-    "Qwen-3":      "qwen2.5-coder:latest",
-    "DeepSeek-R1": "deepseek-r1:8b",
+    "Mistral":     "mistral:latest",
+    "Llama-3.2":   "llama3.1:latest",
     "Gemma-4":     "gemma4:latest",
 }
 
@@ -213,7 +212,7 @@ def _ollama_signal(
         if len(prices_seq) >= 2:
             oldest = prices_seq[0]
             move_pct = (price - oldest) / oldest * 100 if oldest else 0.0
-            direction = "up" if move_pct > 0.05 else ("down" if move_pct < -0.05 else "flat")
+            direction = "up" if move_pct > 0.02 else ("down" if move_pct < -0.02 else "flat")
             trend_lines.append(
                 f"Price trend over last ~{len(prices_seq) * 3}s: {direction} "
                 f"({move_pct:+.3f}% from ${oldest:,.2f})."
@@ -224,11 +223,11 @@ def _ollama_signal(
             trend_lines.append(f"Last tick change: {tick_chg:+.4f}%.")
 
     context = " ".join(trend_lines)
-    # Add explicit profitability guidance: round-trip cost is ~20 bps so only go directional on clear moves
+    # Keep guidance realistic for low-volatility windows while still allowing HOLD in flat action.
     fee_hint = (
-        "Round-trip trading cost is ~0.20%. "
-        "Only go LONG or SHORT if you see a clear directional move of at least 0.15%; "
-        "otherwise reply HOLD. "
+        "Round-trip trading cost is ~0.08%. "
+        "Go LONG if short-term trend is up, SHORT if short-term trend is down, "
+        "and use HOLD only when price action is truly flat or mixed. "
     )
     prompt = (
         f"You are a short-term crypto trader. {asset} current price: ${price:,.2f}. "
@@ -293,9 +292,9 @@ class ArenaState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.models = {
-            "Qwen-3":      self._mk_model("#02c076", 0.56),
-            "DeepSeek-R1": self._mk_model("#00ccff", 0.52),
-            "Gemma-4":     self._mk_model("#f84960", 0.48),
+            "Mistral":   self._mk_model("#d58bff", 0.60),
+            "Llama-3.2": self._mk_model("#ffaa44", 0.57),
+            "Gemma-4":   self._mk_model("#f84960", 0.49),
         }
         self.prices = {
             "btc": 84_000.0,
@@ -330,7 +329,13 @@ class ArenaState:
         self.live_blocked = False       # True once a 401/403 from Binance is seen
         self.live_blocked_reason = ""  # human-readable reason
         self.guardrail_day = datetime.utcnow().strftime("%Y-%m-%d")
-        self.live_order_queue: queue.Queue[tuple[str, str, str, float]] = queue.Queue()
+        self.live_order_queue: queue.Queue[tuple[str, str, str, str, float]] = queue.Queue()
+        # Live fill ledger: keyed by (model_name, desk, symbol)
+        self.live_ledger: dict[tuple[str, str, str], dict] = {}
+        # Binance position cache from /fapi/v2/positionRisk
+        self.live_positions: dict[str, dict] = {}
+        self.live_positions_last_refresh: float = 0.0
+        self.live_positions_refresh_seconds: float = 15.0
         self.binance_pnl_refresh_seconds = max(5, BINANCE_PNL_REFRESH_SECONDS)
         self.binance_pnl_last_refresh = 0.0
         self.binance_margin_baseline: float | None = None
@@ -352,6 +357,7 @@ class ArenaState:
         self.auto_select_enabled = AUTO_SELECT_ENABLED
         self.auto_select_top_n = max(1, AUTO_SELECT_TOP_N)
         self.auto_select_interval_ticks = max(5, AUTO_SELECT_INTERVAL_TICKS)
+        self.auto_select_round = 0
         self.hold_replace_streak = max(1, HOLD_REPLACE_STREAK)
         self.hold_score_penalty = max(0.0, HOLD_SCORE_PENALTY)
         self.base_signal_chance = min(max(BASE_SIGNAL_CHANCE, 0.01), 0.95)
@@ -825,6 +831,94 @@ class ArenaState:
             futures=True,
         )
 
+    def _record_live_fill(self, model_name: str, desk: str, symbol: str, side_label: str, avg_price: float, executed_qty: float) -> None:
+        """Record a live fill and compute realized P&L. Must be called under self.lock."""
+        key = (model_name, desk, symbol)
+        if key not in self.live_ledger:
+            self.live_ledger[key] = {
+                "realized_pnl": 0.0, "open_qty": 0.0, "avg_entry": 0.0,
+                "wins": 0, "losses": 0, "trades": 0,
+            }
+        L = self.live_ledger[key]
+        is_long = (side_label == "LONG")
+        fill_qty = executed_qty  # always positive
+        open_qty = L["open_qty"]  # positive = long, negative = short
+
+        if abs(open_qty) < 1e-12:
+            # Flat → open new position
+            L["open_qty"] = fill_qty if is_long else -fill_qty
+            L["avg_entry"] = avg_price
+            L["trades"] += 1
+        elif (open_qty > 0 and is_long) or (open_qty < 0 and not is_long):
+            # Same direction → add to position (average down/up)
+            total_qty = abs(open_qty) + fill_qty
+            L["avg_entry"] = (L["avg_entry"] * abs(open_qty) + avg_price * fill_qty) / total_qty
+            L["open_qty"] = total_qty if is_long else -total_qty
+        else:
+            # Opposite direction → close and/or flip
+            close_qty = min(fill_qty, abs(open_qty))
+            if open_qty > 0:
+                pnl = (avg_price - L["avg_entry"]) * close_qty
+            else:
+                pnl = (L["avg_entry"] - avg_price) * close_qty
+            L["realized_pnl"] += pnl
+            if pnl > 0:
+                L["wins"] += 1
+            elif pnl < 0:
+                L["losses"] += 1
+            L["trades"] += 1
+            flip_qty = fill_qty - close_qty
+            if flip_qty > 1e-12:
+                # Flip: open new position in new direction
+                L["open_qty"] = flip_qty if is_long else -flip_qty
+                L["avg_entry"] = avg_price
+            else:
+                L["open_qty"] = 0.0
+                L["avg_entry"] = 0.0
+
+    def _ledger_pnl(self, model_name: str, desk: str, symbol: str) -> float:
+        """Realized + mark-to-market unrealized P&L for one ledger entry. Under self.lock."""
+        key = (model_name, desk, symbol)
+        L = self.live_ledger.get(key)
+        if not L:
+            return 0.0
+        realized = L["realized_pnl"]
+        open_qty = L["open_qty"]
+        if abs(open_qty) < 1e-12 or L["avg_entry"] <= 0:
+            return realized
+        price_key = _SYMBOL_PRICE_KEY.get(symbol, "btc")
+        mark = float(self.prices.get(price_key, 0.0) or 0.0)
+        if mark <= 0:
+            return realized
+        unrealized = open_qty * (mark - L["avg_entry"])  # positive = long profit, negative = long loss
+        return realized + unrealized
+
+    def _ledger_model_desk_pnl(self, model_name: str, desk: str) -> float:
+        """Sum realized + unrealized P&L for one model on one desk. Under self.lock."""
+        symbols = self._desk_symbols(desk)
+        return sum(self._ledger_pnl(model_name, desk, sym) for sym in symbols)
+
+    def _ledger_desk_total_pnl(self, desk: str) -> float:
+        """Sum realized + unrealized P&L across all models for a desk. Under self.lock."""
+        return sum(self._ledger_model_desk_pnl(nm, desk) for nm in self.models)
+
+    def _refresh_binance_positions_if_due(self) -> None:
+        """Poll /fapi/v2/positionRisk for open exchange positions (non-fatal if unavailable).
+        Must be called while self.lock is already held (same pattern as _refresh_binance_pnl_if_due)."""
+        if time.monotonic() - self.live_positions_last_refresh < self.live_positions_refresh_seconds:
+            return
+        self.live_positions_last_refresh = time.monotonic()
+        if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+            return
+        try:
+            positions = self._binance_signed_get("/fapi/v2/positionRisk", {}, futures=True)
+            self.live_positions = {
+                p["symbol"]: p for p in positions
+                if abs(float(p.get("positionAmt", "0") or "0")) > 1e-12
+            }
+        except Exception:
+            pass  # non-fatal; stale data is acceptable
+
     def _live_order_startup_check(self) -> None:
         """Run once at startup: verify Binance Futures balance and API access."""
         time.sleep(2)  # let the price feed settle first
@@ -855,13 +949,18 @@ class ArenaState:
     def _live_order_worker(self) -> None:
         """Executes live orders sequentially to avoid parallel request bursts."""
         while True:
-            model_name, symbol, side_label, order_usd = self.live_order_queue.get()
+            model_name, desk, symbol, side_label, order_usd = self.live_order_queue.get()
             try:
                 side = "BUY" if side_label == "LONG" else "SELL"
                 result = self._place_live_market_order(symbol, side, order_usd)
                 order_id = result.get("orderId", "?")
+                avg_price = float(result.get("avgPrice") or 0)
+                executed_qty = float(result.get("executedQty") or 0)
+                cum_quote = float(result.get("cumQuote") or 0)
                 with self.lock:
-                    self.add_log(f"{model_name} LIVE {symbol} {side_label} ${order_usd:.2f} (order {order_id})")
+                    self.add_log(f"{model_name} LIVE {symbol} {side_label} ${cum_quote:.2f} @ {avg_price:.4f} (order {order_id})")
+                    if avg_price > 0 and executed_qty > 0:
+                        self._record_live_fill(model_name, desk, symbol, side_label, avg_price, executed_qty)
             except Exception as exc:
                 err_str = str(exc)
                 with self.lock:
@@ -1095,7 +1194,7 @@ class ArenaState:
                 )
 
         for symbol, order_usd in allocations.items():
-            self.live_order_queue.put((model_name, symbol, side_label, order_usd))
+            self.live_order_queue.put((model_name, desk, symbol, side_label, order_usd))
         with self.lock:
             self.last_live_entry_tick_by_desk[desk] = self.tick_count
             self.last_live_entry_tick_global = self.tick_count
@@ -1290,14 +1389,22 @@ class ArenaState:
 
     def _model_score(self, name: str, desk: str) -> float:
         slot = self.models[name]["desk_state"][desk]
-        pnl = float(slot.get("realized_pnl", 0.0))
-        if slot.get("selected"):
-            pnl += float(slot.get("balance", START_BALANCE)) - START_BALANCE
-        wins = int(slot.get("wins", 0))
-        losses = int(slot.get("losses", 0))
+        if self.strict_no_simulation and self.live_trading:
+            # Use real fill ledger for scoring (no sim balance)
+            pnl = self._ledger_model_desk_pnl(name, desk)
+            syms = self._desk_symbols(desk)
+            wins = sum(self.live_ledger.get((name, desk, s), {}).get("wins", 0) for s in syms)
+            losses = sum(self.live_ledger.get((name, desk, s), {}).get("losses", 0) for s in syms)
+            trades = sum(self.live_ledger.get((name, desk, s), {}).get("trades", 0) for s in syms)
+        else:
+            pnl = float(slot.get("realized_pnl", 0.0))
+            if slot.get("selected"):
+                pnl += float(slot.get("balance", START_BALANCE)) - START_BALANCE
+            wins = int(slot.get("wins", 0))
+            losses = int(slot.get("losses", 0))
+            trades = int(slot.get("trades", 0))
         decisions = wins + losses
         win_rate = (wins / decisions) if decisions else 0.5
-        trades = int(slot.get("trades", 0))
         expectancy = pnl / trades if trades else 0.0
         continuity = 0.2 if slot.get("selected") else 0.0
         hold_streak = int(slot.get("hold_streak", 0))
@@ -1365,9 +1472,13 @@ class ArenaState:
     def _auto_select_models(self) -> None:
         if not self.auto_select_enabled:
             return
-        model_count = len(self.models)
+        model_names = list(self.models.keys())
+        model_count = len(model_names)
         if model_count == 0:
             return
+        round_idx = self.auto_select_round % model_count
+        self.auto_select_round += 1
+        model_index = {nm: i for i, nm in enumerate(model_names)}
         top_n = min(max(1, self.auto_select_top_n), model_count)
         
         # First pass: select models for each desk independently
@@ -1379,8 +1490,11 @@ class ArenaState:
                 if slot.get("selected") and int(slot.get("hold_streak", 0)) >= self.hold_replace_streak:
                     forced_rotate.add(nm)
             ranked = sorted(
-                self.models.keys(),
-                key=lambda nm: self._model_score(nm, desk),
+                model_names,
+                key=lambda nm: (
+                    self._model_score(nm, desk),
+                    -((model_index[nm] - round_idx) % model_count),
+                ),
                 reverse=True,
             )
             ranked_pool = [nm for nm in ranked if nm not in forced_rotate]
@@ -1656,59 +1770,52 @@ class ArenaState:
     def snapshot(self) -> dict:
         with self.lock:
             strict_live_mode = self.strict_no_simulation and self.live_trading
-            btc_equity = sum(m["desk_state"]["btc"]["balance"] for m in self.models.values() if m["desk_state"]["btc"]["selected"])
-            basket_equity = sum(m["desk_state"]["basket"]["balance"] for m in self.models.values() if m["desk_state"]["basket"]["selected"])
-            btc_pnl = sum(
-                m["desk_state"]["btc"].get("realized_pnl", 0.0)
-                + (m["desk_state"]["btc"]["balance"] - START_BALANCE)
-                for m in self.models.values()
-                if m["desk_state"]["btc"]["selected"]
-            )
-            basket_pnl = sum(
-                m["desk_state"]["basket"].get("realized_pnl", 0.0)
-                + (m["desk_state"]["basket"]["balance"] - START_BALANCE)
-                for m in self.models.values()
-                if m["desk_state"]["basket"]["selected"]
-            )
-            app_total_pnl = btc_pnl + basket_pnl
-            if self.strict_no_simulation and self.binance_pnl.get("available"):
-                binance_total = float(self.binance_pnl.get("equity_delta_usd", 0.0) or 0.0)
-                internal_total = btc_pnl + basket_pnl
-                # Scale internal desk P&Ls to match Binance total (source of truth)
-                # This preserves the ratio between desks and accounts for execution costs/slippage
-                if abs(internal_total) > 1e-6:  # Only scale if internal total is not essentially zero
-                    scale = binance_total / internal_total
-                    btc_pnl = btc_pnl * scale
-                    basket_pnl = basket_pnl * scale
-                else:
-                    # If internal total is essentially zero, use Binance total proportionally
-                    # For now, just make both desks zero
-                    btc_pnl = 0.0
-                    basket_pnl = 0.0
-                app_total_pnl = binance_total
+            if strict_live_mode:
+                # Real P&L from live fill ledger (realized + mark-to-market unrealized per symbol)
+                btc_pnl = self._ledger_desk_total_pnl("btc")
+                basket_pnl = self._ledger_desk_total_pnl("basket")
+                app_total_pnl = btc_pnl + basket_pnl
+                # Equity balances are not meaningful in strict live mode; use 0
+                btc_equity = 0.0
+                basket_equity = 0.0
+            else:
+                btc_equity = sum(m["desk_state"]["btc"]["balance"] for m in self.models.values() if m["desk_state"]["btc"]["selected"])
+                basket_equity = sum(m["desk_state"]["basket"]["balance"] for m in self.models.values() if m["desk_state"]["basket"]["selected"])
+                btc_pnl = sum(
+                    m["desk_state"]["btc"].get("realized_pnl", 0.0)
+                    + (m["desk_state"]["btc"]["balance"] - START_BALANCE)
+                    for m in self.models.values()
+                    if m["desk_state"]["btc"]["selected"]
+                )
+                basket_pnl = sum(
+                    m["desk_state"]["basket"].get("realized_pnl", 0.0)
+                    + (m["desk_state"]["basket"]["balance"] - START_BALANCE)
+                    for m in self.models.values()
+                    if m["desk_state"]["basket"]["selected"]
+                )
+                app_total_pnl = btc_pnl + basket_pnl
             # Per-model performance stats aggregated across both desks.
             model_stats = {}
             for nm, mm in self.models.items():
-                total_r = 0.0
-                for dk in ("btc", "basket"):
-                    sl = mm["desk_state"][dk]
-                    r = sl.get("realized_pnl", 0.0)
-                    if sl["selected"]:
-                        r += sl["balance"] - START_BALANCE
-                    total_r += r
+                if strict_live_mode:
+                    btc_r = self._ledger_model_desk_pnl(nm, "btc")
+                    basket_r = self._ledger_model_desk_pnl(nm, "basket")
+                    total_r = btc_r + basket_r
+                else:
+                    btc_r = (
+                        mm["desk_state"]["btc"].get("realized_pnl", 0.0)
+                        + (mm["desk_state"]["btc"]["balance"] - START_BALANCE if mm["desk_state"]["btc"]["selected"] else 0.0)
+                    )
+                    basket_r = (
+                        mm["desk_state"]["basket"].get("realized_pnl", 0.0)
+                        + (mm["desk_state"]["basket"]["balance"] - START_BALANCE if mm["desk_state"]["basket"]["selected"] else 0.0)
+                    )
+                    total_r = btc_r + basket_r
                 model_stats[nm] = {
                     "color": mm["color"],
                     "total_pnl": round(total_r, 4),
-                    "btc_pnl": round(
-                        mm["desk_state"]["btc"].get("realized_pnl", 0.0)
-                        + (mm["desk_state"]["btc"]["balance"] - START_BALANCE if mm["desk_state"]["btc"]["selected"] else 0.0),
-                        4,
-                    ),
-                    "basket_pnl": round(
-                        mm["desk_state"]["basket"].get("realized_pnl", 0.0)
-                        + (mm["desk_state"]["basket"]["balance"] - START_BALANCE if mm["desk_state"]["basket"]["selected"] else 0.0),
-                        4,
-                    ),
+                    "btc_pnl": round(btc_r, 4),
+                    "basket_pnl": round(basket_r, 4),
                     "btc_selected":    mm["desk_state"]["btc"]["selected"],
                     "basket_selected": mm["desk_state"]["basket"]["selected"],
                     "btc_signal":    mm["desk_state"]["btc"]["last_signal"],
@@ -1786,6 +1893,7 @@ class ArenaState:
             self.tick_count += 1
             self.refresh_prices()
             self._refresh_binance_pnl_if_due()
+            self._refresh_binance_positions_if_due()
             self._evaluate_guardrails()
             should_bootstrap_selection = self.selected_count("btc") == 0 and self.selected_count("basket") == 0
             if self.auto_select_enabled and (

@@ -348,6 +348,21 @@
             applyPnlText(el, Number(value || 0));
         }
 
+        function computeDeskPnlFromModels(models, desk, startBalance) {
+            // In strict live mode, model_stats.btc_pnl/basket_pnl come from the real fill ledger.
+            // This function is kept only for sim/fallback mode where model_stats may be absent.
+            if (!models || typeof models !== 'object') return 0;
+            let total = 0;
+            for (const m of Object.values(models)) {
+                if (!m || !m.desk_state || !m.desk_state[desk]) continue;
+                const slot = m.desk_state[desk];
+                const realized = Number(slot.realized_pnl || 0);
+                const active = slot.selected ? (Number(slot.balance || 0) - startBalance) : 0;
+                total += (realized + active);
+            }
+            return total;
+        }
+
         function clockAgeSeconds(hms) {
             if (!hms || typeof hms !== 'string') return null;
             const p = hms.split(':').map(Number);
@@ -414,6 +429,9 @@
             }
             llmReportBody.innerHTML = entries.map(([name, m], i) => {
                 const isAi = ollamaModels.includes(name);
+                const btcPnl = Number(m.btc_pnl || 0);
+                const basketPnl = Number(m.basket_pnl || 0);
+                const totalPnl = Number(m.total_pnl || 0);
                 const activeDots =
                     (m.btc_selected ? '<span class="desk-dot" style="background:#f0b90b" title="BTC"></span>' : '') +
                     (m.basket_selected ? '<span class="desk-dot" style="background:#00ccff" title="Basket"></span>' : '');
@@ -421,9 +439,9 @@
                     + '<td style="color:#848e9c">' + (i + 1) + '</td>'
                     + '<td><span style="color:' + m.color + ';font-weight:700">' + name + '</span>'
                     +    (isAi ? ' <span style="font-size:14px;background:#a7f432;color:#0b0e11;border-radius:3px;padding:1px 5px;font-weight:700">AI</span>' : '') + '</td>'
-                    + '<td class="' + pnlCls(m.total_pnl) + '">' + (m.total_pnl >= 0 ? '+' : '') + '$' + m.total_pnl.toFixed(2) + '</td>'
-                    + '<td class="' + pnlCls(m.btc_pnl) + '">' + (m.btc_pnl >= 0 ? '+' : '') + '$' + m.btc_pnl.toFixed(2) + '</td>'
-                    + '<td class="' + pnlCls(m.basket_pnl) + '">' + (m.basket_pnl >= 0 ? '+' : '') + '$' + m.basket_pnl.toFixed(2) + '</td>'
+                    + '<td class="' + pnlCls(totalPnl) + '">' + (totalPnl >= 0 ? '+' : '') + '$' + totalPnl.toFixed(2) + '</td>'
+                    + '<td class="' + pnlCls(btcPnl) + '">' + (btcPnl >= 0 ? '+' : '') + '$' + btcPnl.toFixed(2) + '</td>'
+                    + '<td class="' + pnlCls(basketPnl) + '">' + (basketPnl >= 0 ? '+' : '') + '$' + basketPnl.toFixed(2) + '</td>'
                     + '<td>' + sigBadge(m.btc_signal) + '</td>'
                     + '<td>' + sigBadge(m.basket_signal) + '</td>'
                     + '<td style="text-align:center">' + (activeDots || '<span style="color:#444">—</span>') + '</td>'
@@ -549,9 +567,10 @@
             document.title = 'QuantPlot AI | ' + modeWord;
             if (modeLabelEl) { modeLabelEl.innerText = modeWord; modeLabelEl.style.color = isLive ? '#02c076' : '#f0b90b'; }
 
-            // Desk prices & PnL
-            const btcPnl    = s.desk_pnl ? Number(s.desk_pnl.btc || 0) : (s.desk_equity.btc - countSelected(models, 'btc') * startBalance);
-            const basketPnl = s.desk_pnl ? Number(s.desk_pnl.basket || 0) : (s.desk_equity.basket - countSelected(models, 'basket') * startBalance);
+            // Desk prices & PnL — use model_stats from server (real fill ledger in live mode)
+            const modelStats = s.model_stats || {};
+            let btcPnl = Object.values(modelStats).reduce((acc, m) => acc + Number(m.btc_pnl || 0), 0);
+            let basketPnl = Object.values(modelStats).reduce((acc, m) => acc + Number(m.basket_pnl || 0), 0);
             const strictLive = !!(s.status && s.status.no_simulation && s.status.mode === 'LIVE');
             if (basketPriceDeskEl) basketPriceDeskEl.innerText = '$' + Number(s.prices.basket).toLocaleString(undefined, { maximumFractionDigits: 2 });
             let btcDeskDisplayPnl = btcPnl;
@@ -560,6 +579,9 @@
             // Split models into groups
             const btcSelected    = names.filter(n => models[n].desk_state && models[n].desk_state.btc && models[n].desk_state.btc.selected);
             const basketSelected = names.filter(n => models[n].desk_state && models[n].desk_state.basket && models[n].desk_state.basket.selected);
+            const totalPnl = (typeof s.app_total_pnl_usd === 'number')
+                ? Number(s.app_total_pnl_usd)
+                : (btcPnl + basketPnl);
 
             // Available pools — show ALL models in BOTH desks.
             // Lock only if selected in the SAME desk (desks are independent).
@@ -588,13 +610,15 @@
                 const m = models[n];
                 const btc = m.desk_state.btc;
                 const view = Object.assign({}, m, { last_signal: btc.last_signal });
-                return chipHtml(n, view, btc.balance - startBalance, ollama);
+                const pnl = Number((modelStats[n] && modelStats[n].btc_pnl) || 0);
+                return chipHtml(n, view, pnl, ollama);
             }).join('');
             selectedBasketEl.innerHTML = basketSelected.map((n) => {
                 const m = models[n];
                 const basket = m.desk_state.basket;
                 const view = Object.assign({}, m, { last_signal: basket.last_signal });
-                return chipHtml(n, view, basket.balance - startBalance, ollama);
+                const pnl = Number((modelStats[n] && modelStats[n].basket_pnl) || 0);
+                return chipHtml(n, view, pnl, ollama);
             }).join('');
 
             emptyBtcEl.style.display    = btcSelected.length    ? 'none' : 'block';
@@ -602,9 +626,6 @@
 
             activeModelsEl.innerText = String(btcSelected.length + basketSelected.length);
 
-            const totalPnl = (typeof s.app_total_pnl_usd === 'number')
-                ? Number(s.app_total_pnl_usd)
-                : (btcPnl + basketPnl);
             applyPnlText(pnlEl, totalPnl);
             renderBinancePnl(totalPnl, s.binance_pnl || null, s.ts || null);
             renderPauseButtons(s);
