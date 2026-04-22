@@ -18,6 +18,8 @@ from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from execution_core import ExecutionCore, SignalRequest
+
 HOST = "127.0.0.1"
 PORT = 8000
 START_BALANCE = 10_000.0
@@ -178,6 +180,8 @@ try:
     AGGRESSIVE_MOVE_PCT = float(os.getenv("ALPHA_AGGRESSIVE_MOVE_PCT", "0.35"))
 except ValueError:
     AGGRESSIVE_MOVE_PCT = 0.35
+EXECUTION_CORE_MODE = os.getenv("ALPHA_EXECUTION_CORE_MODE", "shadow").strip().lower()
+EXECUTION_CORE_FALLBACK_ENABLED = os.getenv("ALPHA_EXECUTION_CORE_FALLBACK_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
 try:
     AGGRESSIVE_SIGNAL_MULTIPLIER = float(os.getenv("ALPHA_AGGRESSIVE_SIGNAL_MULTIPLIER", "1.7"))
 except ValueError:
@@ -544,6 +548,10 @@ class ArenaState:
         self.message_center: list[str] = []
         self.away_mode = False
         self.server_started_at = datetime.now().isoformat()
+        self.execution_core = ExecutionCore(
+            mode=EXECUTION_CORE_MODE,
+            fallback_enabled=EXECUTION_CORE_FALLBACK_ENABLED,
+        )
         # Queue for Ollama signal generation (parallel workers to avoid bottleneck)
         self.ollama_signal_queue: queue.Queue[tuple[str, str, str, float]] = queue.Queue()
         self.ollama_signal_pending: set[tuple[str, str]] = set()
@@ -1344,6 +1352,25 @@ class ArenaState:
                 self.live_blocked_reason = f"Binance Futures auth check failed: {exc}"
                 self.add_log(f"LIVE BLOCKED: {self.live_blocked_reason}")
 
+    def set_execution_core_mode(self, mode: str) -> tuple[bool, str]:
+        with self.lock:
+            changed, msg = self.execution_core.set_mode((mode or "").strip().lower())
+            if changed:
+                self.add_log(f"EXECUTION CORE MODE -> {self.execution_core.mode.upper()}")
+            return changed, msg
+
+    def set_execution_core_fallback(self, enabled: bool) -> tuple[bool, str]:
+        with self.lock:
+            changed, msg = self.execution_core.set_fallback_enabled(bool(enabled))
+            if changed:
+                state = "ON" if self.execution_core.fallback_enabled else "OFF"
+                self.add_log(f"EXECUTION CORE FALLBACK -> {state}")
+            return changed, msg
+
+    def execution_core_health(self) -> dict:
+        with self.lock:
+            return self.execution_core.health_snapshot()
+
     def _live_order_worker(self) -> None:
         """Executes live orders sequentially to avoid parallel request bursts."""
         while True:
@@ -1513,7 +1540,7 @@ class ArenaState:
                 # Small delay between sequential requests prevents Ollama overload
                 time.sleep(0.1)
 
-    def _execute_live_signal(
+    def _execute_live_signal_legacy(
         self,
         model_name: str,
         desk: str,
@@ -1662,6 +1689,115 @@ class ArenaState:
                 f"{model_name} queued LIVE {side_label} on "
                 f"{', '.join(f'{s}:${allocations[s]:.2f}' for s in allocations)} "
                 f"(total ${required_usdt:.2f})"
+            )
+        return True
+
+    def _execute_live_signal(
+        self,
+        model_name: str,
+        desk: str,
+        side_label: str,
+        signal_arm: str = "control",
+        signal_provider: str = "",
+    ) -> bool:
+        with self.lock:
+            mode = self.execution_core.mode
+            req = SignalRequest(
+                model_name=model_name,
+                desk=desk,
+                side_label=side_label,
+                total_order_usd=self.live_order_usd,
+                max_order_usd=self.max_order_usd,
+                live_trading=self.live_trading,
+                require_live_feed=self.require_live_feed,
+                live_feed=self.live_feed,
+                kill_switch=self.kill_switch,
+                pause_all_desks=self.pause_all_desks,
+                pause_desk=self.paused_desks.get(desk, False),
+                live_blocked=self.live_blocked,
+                live_blocked_reason=self.live_blocked_reason,
+                one_live_entry_per_desk_per_tick=self.one_live_entry_per_desk_per_tick,
+                one_live_entry_global_per_tick=self.one_live_entry_global_per_tick,
+                desk_already_routed_this_tick=(self.last_live_entry_tick_by_desk.get(desk, -1) == self.tick_count),
+                global_already_routed_this_tick=(self.last_live_entry_tick_global == self.tick_count),
+                allow_cross_symbol_fallback=self.allow_cross_symbol_fallback,
+                desk_symbols=self._desk_symbols(desk),
+                universe_symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"],
+                symbol_prices={
+                    "BTCUSDT": float(self.prices.get("btc", 0.0) or 0.0),
+                    "ETHUSDT": float(self.prices.get("eth", 0.0) or 0.0),
+                    "SOLUSDT": float(self.prices.get("sol", 0.0) or 0.0),
+                    "BNBUSDT": float(self.prices.get("bnb", 0.0) or 0.0),
+                },
+                qty_precision=dict(_FUTURES_QTY_PRECISION),
+                min_notional=dict(_FUTURES_MIN_NOTIONAL_USD),
+                duplicate_cooldown_seconds=self.live_duplicate_cooldown_seconds,
+                symbol_cooldown_seconds=self.live_symbol_cooldown_seconds,
+                last_symbol_side_ts=dict(self.last_live_symbol_side_ts),
+                last_symbol_ts=dict(self.last_live_symbol_ts),
+                now_epoch=time.time(),
+            )
+        plan = self.execution_core.plan_signal(req)
+
+        if mode == "legacy":
+            return self._execute_live_signal_legacy(model_name, desk, side_label, signal_arm, signal_provider)
+
+        if mode == "shadow":
+            q_before = self.live_order_queue.qsize()
+            executed = self._execute_live_signal_legacy(model_name, desk, side_label, signal_arm, signal_provider)
+            q_after = self.live_order_queue.qsize()
+            queued_symbols: list[str] = []
+            if q_after > q_before:
+                try:
+                    pending_items = list(self.live_order_queue.queue)
+                    for item in pending_items[-(q_after - q_before):]:
+                        queued_symbols.append(str(item[2]))
+                except Exception:
+                    queued_symbols = []
+            with self.lock:
+                self.execution_core.record_shadow_compare(plan, executed, queued_symbols)
+            return executed
+
+        if mode != "cutover":
+            return self._execute_live_signal_legacy(model_name, desk, side_label, signal_arm, signal_provider)
+
+        if not plan.allowed:
+            with self.lock:
+                self.add_log(f"{model_name} CORE cutover skipped: {plan.reason}")
+            return False
+
+        try:
+            free_usdt = self._get_futures_usdt_balance()
+        except Exception as exc:
+            with self.lock:
+                self.add_log(f"{model_name} CORE precheck failed: {exc}")
+            if self.execution_core.fallback_enabled:
+                with self.lock:
+                    self.add_log(f"{model_name} CORE fallback -> LEGACY")
+                return self._execute_live_signal_legacy(model_name, desk, side_label, signal_arm, signal_provider)
+            return False
+
+        if free_usdt + 1e-9 < plan.required_usdt:
+            with self.lock:
+                self.add_log(
+                    f"CORE FUNDS WARNING: free ${free_usdt:.2f} below est. notional ${plan.required_usdt:.2f}; sending orders"
+                )
+
+        for symbol, order_usd in plan.allocations.items():
+            self.live_order_queue.put((model_name, desk, symbol, side_label, order_usd, signal_arm, signal_provider))
+        with self.lock:
+            self.last_live_entry_tick_by_desk[desk] = self.tick_count
+            self.last_live_entry_tick_global = self.tick_count
+            stamp = time.time()
+            for symbol in plan.allocations:
+                self.last_live_symbol_side_ts[(symbol, side_label)] = stamp
+                self.last_live_symbol_ts[symbol] = stamp
+            self.execution_core.record_cutover_routed(len(plan.allocations))
+            route_note = " (fallback symbol set)" if plan.used_fallback_symbols else ""
+            self.add_log(
+                f"{model_name} CORE queued LIVE {side_label} on "
+                f"{', '.join(f'{s}:${plan.allocations[s]:.2f}' for s in plan.allocations)} "
+                f"(total ${plan.required_usdt:.2f}){route_note}"
             )
         return True
 
@@ -2361,6 +2497,12 @@ class ArenaState:
                     "ollama_models": list(self._model_provider_map().keys()),
                     "puter_grok_enabled": bool(self.puter_auth_token),
                     "canary": self._canary_summary(),
+                    "execution_core": self.execution_core.health_snapshot(),
+                    "compatibility_api": {
+                        "version": "v1",
+                        "state_route": "/api/v1/state",
+                        "post_route_prefix": "/api/v1",
+                    },
                 },
                 "desk_equity": {
                     "btc": btc_equity,
@@ -2417,19 +2559,29 @@ class ArenaHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = self.path.split("?", 1)[0]
-        if path in {"/api/state", "/data"}:
+        if path in {"/api/state", "/api/v1/state", "/data"}:
             self._json(200, self.state.snapshot())
+            return
+        if path == "/api/core/health":
+            self._json(200, {"ok": True, "health": self.state.execution_core_health()})
             return
         if path == "/":
             self.path = "/quantplot_ai.html"
         super().do_GET()
 
     def do_POST(self) -> None:
-        if self.path not in {
+        route_path = self.path
+        if route_path.startswith("/api/v1/"):
+            route_path = "/api/" + route_path[len("/api/v1/"):]
+
+        if route_path not in {
             "/api/select",
             "/api/deselect",
             "/api/pause",
             "/api/flatten-futures",
+            "/api/core/mode",
+            "/api/core/fallback",
+            "/api/core/cutover",
             "/api/store/backup",
             "/api/store/purge",
             "/api/auto-select",
@@ -2449,24 +2601,70 @@ class ArenaHandler(SimpleHTTPRequestHandler):
             self._json(400, {"ok": False, "error": "Invalid JSON"})
             return
 
-        if self.path == "/api/store/backup":
+        if route_path == "/api/store/backup":
             info = self.state.create_store_backup()
             self._json(200, {"ok": True, **info})
             return
 
-        if self.path == "/api/store/purge":
+        if route_path == "/api/store/purge":
             backup_first = data.get("backup_first", True)
             info = self.state.purge_stores(bool(backup_first))
             self._json(200, info)
             return
 
-        if self.path == "/api/flatten-futures":
+        if route_path == "/api/flatten-futures":
             result = self.state.flatten_all_futures_positions()
             code = 200 if result.get("ok") else 500
             self._json(code, result)
             return
 
-        if self.path == "/api/pause":
+        if route_path == "/api/core/mode":
+            mode = data.get("mode", "")
+            if not isinstance(mode, str):
+                self._json(400, {"ok": False, "error": "mode must be a string"})
+                return
+            changed, msg = self.state.set_execution_core_mode(mode)
+            code = 200 if changed else 409
+            self._json(code, {
+                "ok": changed,
+                "changed": changed,
+                "mode": self.state.execution_core_health().get("mode"),
+                "message": msg,
+            })
+            return
+
+        if route_path == "/api/core/fallback":
+            enabled = data.get("enabled")
+            if not isinstance(enabled, bool):
+                self._json(400, {"ok": False, "error": "enabled must be boolean"})
+                return
+            changed, msg = self.state.set_execution_core_fallback(enabled)
+            code = 200 if changed else 409
+            self._json(code, {
+                "ok": changed,
+                "changed": changed,
+                "fallback_enabled": bool(enabled),
+                "message": msg,
+            })
+            return
+
+        if route_path == "/api/core/cutover":
+            enabled = data.get("enabled")
+            if not isinstance(enabled, bool):
+                self._json(400, {"ok": False, "error": "enabled must be boolean"})
+                return
+            target_mode = "cutover" if enabled else "shadow"
+            changed, msg = self.state.set_execution_core_mode(target_mode)
+            code = 200 if changed else 409
+            self._json(code, {
+                "ok": changed,
+                "changed": changed,
+                "mode": target_mode,
+                "message": msg,
+            })
+            return
+
+        if route_path == "/api/pause":
             desk = data.get("desk", "")
             if desk not in {"btc", "basket", "all"}:
                 self._json(400, {"ok": False, "error": "desk must be one of: btc, basket, all"})
@@ -2485,7 +2683,7 @@ class ArenaHandler(SimpleHTTPRequestHandler):
             self._json(200, {"ok": True})
             return
 
-        if self.path == "/api/auto-select":
+        if route_path == "/api/auto-select":
             enabled_raw = data.get("enabled")
             if not isinstance(enabled_raw, bool):
                 self._json(400, {"ok": False, "error": "enabled must be boolean"})
@@ -2494,12 +2692,12 @@ class ArenaHandler(SimpleHTTPRequestHandler):
             self._json(200, {"ok": True, "changed": changed, "enabled": bool(enabled_raw)})
             return
 
-        if self.path == "/api/desks/clear":
+        if route_path == "/api/desks/clear":
             cleared = self.state.clear_all_desks()
             self._json(200, {"ok": True, "cleared": cleared})
             return
 
-        if self.path == "/api/away-mode":
+        if route_path == "/api/away-mode":
             enabled_raw = data.get("enabled")
             if not isinstance(enabled_raw, bool):
                 self._json(400, {"ok": False, "error": "enabled must be boolean"})
@@ -2508,7 +2706,7 @@ class ArenaHandler(SimpleHTTPRequestHandler):
             self._json(200, {"ok": True, "changed": changed, "away_mode": bool(enabled_raw)})
             return
 
-        if self.path == "/api/puter-token":
+        if route_path == "/api/puter-token":
             token_raw = data.get("token", "")
             if token_raw is not None and not isinstance(token_raw, str):
                 self._json(400, {"ok": False, "error": "token must be a string"})
@@ -2521,12 +2719,12 @@ class ArenaHandler(SimpleHTTPRequestHandler):
             })
             return
 
-        if self.path == "/api/message/pnl-health":
+        if route_path == "/api/message/pnl-health":
             msg = self.state.push_pnl_health_message()
             self._json(200, {"ok": True, "message": msg})
             return
 
-        if self.path == "/api/message/recent-summary":
+        if route_path == "/api/message/recent-summary":
             msg = self.state.push_recent_summary_message()
             self._json(200, {"ok": True, "message": msg})
             return
@@ -2536,7 +2734,7 @@ class ArenaHandler(SimpleHTTPRequestHandler):
             self._json(400, {"ok": False, "error": "model is required"})
             return
 
-        if self.path == "/api/select":
+        if route_path == "/api/select":
             desk = data.get("desk", "btc")
             ok = self.state.select_model(model, desk)
         else:
