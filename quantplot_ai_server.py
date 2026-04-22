@@ -293,16 +293,9 @@ class ArenaState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.models = {
-            "Qwen-3":          self._mk_model("#02c076", 0.56),
-            "Qwen-2.5-Coder":  self._mk_model("#00e5cc", 0.53),
-            "Qwen3-Coder":     self._mk_model("#00bfa5", 0.55),
-            "DeepSeek-R1":     self._mk_model("#00ccff", 0.52),
-            "Gemma-4":         self._mk_model("#f84960", 0.48),
-            "Phi-3":           self._mk_model("#f0b90b", 0.45),
-            "Llama-4":         self._mk_model("#ff7d4d", 0.50),
-            "Llama-3.2":       self._mk_model("#ffaa44", 0.49),
-            "Mistral":         self._mk_model("#d58bff", 0.51),
-            "finance-llama-8b":self._mk_model("#a7f432", 0.54),
+            "Qwen-3":      self._mk_model("#02c076", 0.56),
+            "DeepSeek-R1": self._mk_model("#00ccff", 0.52),
+            "Gemma-4":     self._mk_model("#f84960", 0.48),
         }
         self.prices = {
             "btc": 84_000.0,
