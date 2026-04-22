@@ -183,6 +183,20 @@ except ValueError:
 EXECUTION_CORE_MODE = os.getenv("ALPHA_EXECUTION_CORE_MODE", "shadow").strip().lower()
 EXECUTION_CORE_FALLBACK_ENABLED = os.getenv("ALPHA_EXECUTION_CORE_FALLBACK_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
 try:
+    EXECUTION_CORE_CUTOVER_THRESHOLD = float(os.getenv("ALPHA_EXECUTION_CORE_CUTOVER_THRESHOLD", "0.99"))
+except ValueError:
+    EXECUTION_CORE_CUTOVER_THRESHOLD = 0.99
+try:
+    EXECUTION_CORE_CUTOVER_MIN_COMPARES = int(os.getenv("ALPHA_EXECUTION_CORE_CUTOVER_MIN_COMPARES", "10"))
+except ValueError:
+    EXECUTION_CORE_CUTOVER_MIN_COMPARES = 10
+try:
+    EXECUTION_CORE_CUTOVER_STABILITY_CHECKS = int(os.getenv("ALPHA_EXECUTION_CORE_CUTOVER_STABILITY_CHECKS", "3"))
+except ValueError:
+    EXECUTION_CORE_CUTOVER_STABILITY_CHECKS = 3
+EXECUTION_CORE_CUTOVER_GATE_ENABLED = os.getenv("ALPHA_EXECUTION_CORE_CUTOVER_GATE_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+EXECUTION_CORE_CUTOVER_AUTO_SWITCH = os.getenv("ALPHA_EXECUTION_CORE_CUTOVER_AUTO_SWITCH", "1").strip().lower() in {"1", "true", "yes", "on"}
+try:
     AGGRESSIVE_SIGNAL_MULTIPLIER = float(os.getenv("ALPHA_AGGRESSIVE_SIGNAL_MULTIPLIER", "1.7"))
 except ValueError:
     AGGRESSIVE_SIGNAL_MULTIPLIER = 1.7
@@ -551,6 +565,13 @@ class ArenaState:
         self.execution_core = ExecutionCore(
             mode=EXECUTION_CORE_MODE,
             fallback_enabled=EXECUTION_CORE_FALLBACK_ENABLED,
+        )
+        self.execution_core.set_cutover_gate(
+            enabled=EXECUTION_CORE_CUTOVER_GATE_ENABLED,
+            auto_switch=EXECUTION_CORE_CUTOVER_AUTO_SWITCH,
+            threshold=EXECUTION_CORE_CUTOVER_THRESHOLD,
+            min_compares=EXECUTION_CORE_CUTOVER_MIN_COMPARES,
+            stability_checks=EXECUTION_CORE_CUTOVER_STABILITY_CHECKS,
         )
         # Queue for Ollama signal generation (parallel workers to avoid bottleneck)
         self.ollama_signal_queue: queue.Queue[tuple[str, str, str, float]] = queue.Queue()
@@ -1129,59 +1150,30 @@ class ArenaState:
 
         actions: list[dict] = []
         errors: list[dict] = []
-        attempted = 0
+        flatten_plan = self.execution_core.plan_flatten_orders(positions, dict(_FUTURES_QTY_PRECISION))
+        attempted = len(flatten_plan.orders)
 
-        for p in positions:
-            symbol = str(p.get("symbol", "") or "")
-            if not symbol:
-                continue
-            try:
-                position_amt = float(p.get("positionAmt", "0") or 0.0)
-            except (TypeError, ValueError):
-                continue
-            if abs(position_amt) <= 1e-12:
-                continue
+        for skipped in flatten_plan.skipped:
+            errors.append({
+                "symbol": skipped.get("symbol", ""),
+                "error": skipped.get("reason", "skipped"),
+            })
 
-            side = "SELL" if position_amt > 0 else "BUY"
-            precision = _FUTURES_QTY_PRECISION.get(symbol, 3)
-            factor = 10 ** precision
-            qty = math.floor(abs(position_amt) * factor) / factor
-            if qty <= 0:
-                errors.append({
-                    "symbol": symbol,
-                    "error": f"quantity rounded to 0 (positionAmt={position_amt})",
-                })
-                continue
-
-            params = {
-                "symbol": symbol,
-                "side": side,
-                "type": "MARKET",
-                "quantity": qty,
-                "newOrderRespType": "RESULT",
-                "reduceOnly": "true",
-            }
-            position_side = str(p.get("positionSide", "") or "").upper()
-            if position_side in {"LONG", "SHORT"}:
-                # Hedge mode: positionSide is required, reduceOnly may be rejected.
-                params["positionSide"] = position_side
-                params.pop("reduceOnly", None)
-
-            attempted += 1
+        for params in flatten_plan.orders:
             try:
                 result = self._binance_signed_post("/fapi/v1/order", params, futures=True)
                 actions.append({
-                    "symbol": symbol,
-                    "side": side,
-                    "qty": qty,
+                    "symbol": params.get("symbol"),
+                    "side": params.get("side"),
+                    "qty": params.get("quantity"),
                     "orderId": result.get("orderId"),
                     "status": result.get("status"),
                 })
             except Exception as exc:
                 errors.append({
-                    "symbol": symbol,
-                    "side": side,
-                    "qty": qty,
+                    "symbol": params.get("symbol"),
+                    "side": params.get("side"),
+                    "qty": params.get("quantity"),
                     "error": str(exc),
                 })
 
@@ -1366,6 +1358,50 @@ class ArenaState:
                 state = "ON" if self.execution_core.fallback_enabled else "OFF"
                 self.add_log(f"EXECUTION CORE FALLBACK -> {state}")
             return changed, msg
+
+    def set_execution_core_cutover_gate(
+        self,
+        *,
+        enabled: bool | None = None,
+        auto_switch: bool | None = None,
+        threshold: float | None = None,
+        min_compares: int | None = None,
+        stability_checks: int | None = None,
+    ) -> tuple[bool, str]:
+        with self.lock:
+            changed, msg = self.execution_core.set_cutover_gate(
+                enabled=enabled,
+                auto_switch=auto_switch,
+                threshold=threshold,
+                min_compares=min_compares,
+                stability_checks=stability_checks,
+            )
+            if changed:
+                gate = self.execution_core.health_snapshot().get("cutover_gate", {})
+                self.add_log(
+                    "EXECUTION CORE GATE -> "
+                    f"enabled={gate.get('enabled')} auto_switch={gate.get('auto_switch')} "
+                    f"threshold={gate.get('threshold')} min_compares={gate.get('min_compares')} "
+                    f"stability_checks={gate.get('stability_checks')}"
+                )
+            return changed, msg
+
+    def execution_core_gate_decision(self) -> dict:
+        with self.lock:
+            return self.execution_core.evaluate_cutover_gate()
+
+    def maybe_auto_cutover(self) -> None:
+        with self.lock:
+            if self.execution_core.mode != "shadow":
+                return
+            decision = self.execution_core.evaluate_cutover_gate()
+            if decision.get("allowed") and decision.get("auto_switch"):
+                changed, _ = self.execution_core.set_mode("cutover")
+                if changed:
+                    self.execution_core.consume_cutover_gate_trigger()
+                    self.add_log(
+                        f"EXECUTION CORE AUTO-CUTOVER: {decision.get('reason', 'eligible')}"
+                    )
 
     def execution_core_health(self) -> dict:
         with self.lock:
@@ -2537,6 +2573,7 @@ class ArenaState:
             ):
                 self._auto_select_models()
             self.step_models()
+        self.maybe_auto_cutover()
 
 
 def trading_loop(state: ArenaState) -> None:
@@ -2582,6 +2619,7 @@ class ArenaHandler(SimpleHTTPRequestHandler):
             "/api/core/mode",
             "/api/core/fallback",
             "/api/core/cutover",
+            "/api/core/gate",
             "/api/store/backup",
             "/api/store/purge",
             "/api/auto-select",
@@ -2653,6 +2691,15 @@ class ArenaHandler(SimpleHTTPRequestHandler):
             if not isinstance(enabled, bool):
                 self._json(400, {"ok": False, "error": "enabled must be boolean"})
                 return
+            if enabled:
+                decision = self.state.execution_core_gate_decision()
+                if not decision.get("allowed"):
+                    self._json(423, {
+                        "ok": False,
+                        "error": "cutover gate blocked",
+                        "reason": decision.get("reason", "gate conditions not met"),
+                    })
+                    return
             target_mode = "cutover" if enabled else "shadow"
             changed, msg = self.state.set_execution_core_mode(target_mode)
             code = 200 if changed else 409
@@ -2661,6 +2708,52 @@ class ArenaHandler(SimpleHTTPRequestHandler):
                 "changed": changed,
                 "mode": target_mode,
                 "message": msg,
+            })
+            return
+
+        if route_path == "/api/core/gate":
+            updates: dict = {}
+            if "enabled" in data:
+                if not isinstance(data.get("enabled"), bool):
+                    self._json(400, {"ok": False, "error": "enabled must be boolean"})
+                    return
+                updates["enabled"] = bool(data.get("enabled"))
+            if "auto_switch" in data:
+                if not isinstance(data.get("auto_switch"), bool):
+                    self._json(400, {"ok": False, "error": "auto_switch must be boolean"})
+                    return
+                updates["auto_switch"] = bool(data.get("auto_switch"))
+            if "threshold" in data:
+                try:
+                    updates["threshold"] = float(data.get("threshold"))
+                except Exception:
+                    self._json(400, {"ok": False, "error": "threshold must be numeric"})
+                    return
+            if "min_compares" in data:
+                try:
+                    updates["min_compares"] = int(data.get("min_compares"))
+                except Exception:
+                    self._json(400, {"ok": False, "error": "min_compares must be integer"})
+                    return
+            if "stability_checks" in data:
+                try:
+                    updates["stability_checks"] = int(data.get("stability_checks"))
+                except Exception:
+                    self._json(400, {"ok": False, "error": "stability_checks must be integer"})
+                    return
+
+            if not updates:
+                self._json(400, {"ok": False, "error": "no gate fields supplied"})
+                return
+
+            changed, msg = self.state.set_execution_core_cutover_gate(**updates)
+            code = 200 if changed else 409
+            health = self.state.execution_core_health()
+            self._json(code, {
+                "ok": changed,
+                "changed": changed,
+                "message": msg,
+                "cutover_gate": health.get("cutover_gate"),
             })
             return
 

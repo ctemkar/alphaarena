@@ -47,6 +47,12 @@ class OrderPlan:
     used_fallback_symbols: bool
 
 
+@dataclass
+class FlattenPlan:
+    orders: list[dict[str, Any]]
+    skipped: list[dict[str, Any]]
+
+
 class ExecutionCore:
     """Greenfield execution planner with shadow/cutover controls."""
 
@@ -61,8 +67,19 @@ class ExecutionCore:
         self.shadow_compares = 0
         self.shadow_matches = 0
         self.shadow_diverges = 0
+        self.flatten_runs = 0
+        self.cutover_gate_enabled = True
+        self.cutover_gate_auto_switch = True
+        self.cutover_gate_threshold = 0.99
+        self.cutover_gate_min_compares = 10
+        self.cutover_gate_stability_checks = 3
+        self.cutover_gate_consecutive_passes = 0
+        self.cutover_gate_triggered = 0
+        self.cutover_gate_last_decision = "waiting"
+        self.cutover_gate_last_reason = "insufficient data"
         self.last_plan: dict[str, Any] = {}
         self.last_shadow: dict[str, Any] = {}
+        self.last_flatten: dict[str, Any] = {}
         self.recent_events: deque[dict[str, Any]] = deque(maxlen=40)
 
     @staticmethod
@@ -105,6 +122,55 @@ class ExecutionCore:
             "fallback_enabled": enabled,
         })
         return True, "updated"
+
+    def set_cutover_gate(
+        self,
+        *,
+        enabled: bool | None = None,
+        auto_switch: bool | None = None,
+        threshold: float | None = None,
+        min_compares: int | None = None,
+        stability_checks: int | None = None,
+    ) -> tuple[bool, str]:
+        changed = False
+        if enabled is not None:
+            enabled_val = bool(enabled)
+            if self.cutover_gate_enabled != enabled_val:
+                self.cutover_gate_enabled = enabled_val
+                changed = True
+        if auto_switch is not None:
+            auto_switch_val = bool(auto_switch)
+            if self.cutover_gate_auto_switch != auto_switch_val:
+                self.cutover_gate_auto_switch = auto_switch_val
+                changed = True
+        if threshold is not None:
+            bounded = min(max(float(threshold), 0.0), 1.0)
+            if abs(self.cutover_gate_threshold - bounded) > 1e-12:
+                self.cutover_gate_threshold = bounded
+                changed = True
+        if min_compares is not None:
+            bounded = max(int(min_compares), 1)
+            if self.cutover_gate_min_compares != bounded:
+                self.cutover_gate_min_compares = bounded
+                changed = True
+        if stability_checks is not None:
+            bounded = max(int(stability_checks), 1)
+            if self.cutover_gate_stability_checks != bounded:
+                self.cutover_gate_stability_checks = bounded
+                changed = True
+        if changed:
+            self.cutover_gate_consecutive_passes = 0
+            self.recent_events.appendleft({
+                "ts": datetime.now().isoformat(),
+                "event": "cutover_gate_change",
+                "enabled": self.cutover_gate_enabled,
+                "auto_switch": self.cutover_gate_auto_switch,
+                "threshold": self.cutover_gate_threshold,
+                "min_compares": self.cutover_gate_min_compares,
+                "stability_checks": self.cutover_gate_stability_checks,
+            })
+            return True, "updated"
+        return False, "no change"
 
     def plan_signal(self, req: SignalRequest) -> OrderPlan:
         self.plans_computed += 1
@@ -214,10 +280,147 @@ class ExecutionCore:
             "shadow_matches": self.shadow_matches,
             "shadow_diverges": self.shadow_diverges,
             "shadow_match_rate": round(match_rate, 4),
+            "flatten_runs": self.flatten_runs,
+            "cutover_gate": {
+                "enabled": self.cutover_gate_enabled,
+                "auto_switch": self.cutover_gate_auto_switch,
+                "threshold": self.cutover_gate_threshold,
+                "min_compares": self.cutover_gate_min_compares,
+                "stability_checks": self.cutover_gate_stability_checks,
+                "consecutive_passes": self.cutover_gate_consecutive_passes,
+                "last_decision": self.cutover_gate_last_decision,
+                "last_reason": self.cutover_gate_last_reason,
+                "triggered": self.cutover_gate_triggered,
+            },
             "last_plan": self.last_plan,
             "last_shadow": self.last_shadow,
+            "last_flatten": self.last_flatten,
             "recent_events": list(self.recent_events),
         }
+
+    def evaluate_cutover_gate(self) -> dict[str, Any]:
+        if not self.cutover_gate_enabled:
+            self.cutover_gate_last_decision = "disabled"
+            self.cutover_gate_last_reason = "gate disabled"
+            return {
+                "allowed": True,
+                "reason": self.cutover_gate_last_reason,
+                "auto_switch": False,
+            }
+        if self.mode != "shadow":
+            self.cutover_gate_last_decision = "not_shadow"
+            self.cutover_gate_last_reason = "gate checks apply only in shadow mode"
+            return {
+                "allowed": False,
+                "reason": self.cutover_gate_last_reason,
+                "auto_switch": False,
+            }
+
+        compares = self.shadow_compares
+        rate = (self.shadow_matches / compares) if compares else 0.0
+        if compares < self.cutover_gate_min_compares:
+            self.cutover_gate_consecutive_passes = 0
+            self.cutover_gate_last_decision = "waiting"
+            self.cutover_gate_last_reason = (
+                f"need {self.cutover_gate_min_compares} compares, have {compares}"
+            )
+            return {
+                "allowed": False,
+                "reason": self.cutover_gate_last_reason,
+                "auto_switch": False,
+            }
+
+        if rate >= self.cutover_gate_threshold:
+            self.cutover_gate_consecutive_passes += 1
+            self.cutover_gate_last_decision = "pass"
+            self.cutover_gate_last_reason = (
+                f"rate {rate:.4f} >= threshold {self.cutover_gate_threshold:.4f}"
+            )
+        else:
+            self.cutover_gate_consecutive_passes = 0
+            self.cutover_gate_last_decision = "fail"
+            self.cutover_gate_last_reason = (
+                f"rate {rate:.4f} < threshold {self.cutover_gate_threshold:.4f}"
+            )
+            return {
+                "allowed": False,
+                "reason": self.cutover_gate_last_reason,
+                "auto_switch": False,
+            }
+
+        allowed = self.cutover_gate_consecutive_passes >= self.cutover_gate_stability_checks
+        auto_switch = bool(allowed and self.cutover_gate_auto_switch)
+        if allowed:
+            self.cutover_gate_last_decision = "eligible"
+            self.cutover_gate_last_reason = (
+                f"eligible after {self.cutover_gate_consecutive_passes} consecutive passes"
+            )
+        return {
+            "allowed": allowed,
+            "reason": self.cutover_gate_last_reason,
+            "auto_switch": auto_switch,
+        }
+
+    def consume_cutover_gate_trigger(self) -> None:
+        self.cutover_gate_triggered += 1
+        self.cutover_gate_consecutive_passes = 0
+        self.recent_events.appendleft({
+            "ts": datetime.now().isoformat(),
+            "event": "cutover_gate_triggered",
+            "triggered_count": self.cutover_gate_triggered,
+        })
+
+    def plan_flatten_orders(
+        self,
+        positions: list[dict[str, Any]],
+        qty_precision: dict[str, int],
+    ) -> FlattenPlan:
+        orders: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        for row in positions:
+            symbol = str(row.get("symbol", "") or "")
+            if not symbol:
+                continue
+            try:
+                position_amt = float(row.get("positionAmt", "0") or 0.0)
+            except (TypeError, ValueError):
+                skipped.append({"symbol": symbol, "reason": "invalid positionAmt"})
+                continue
+            if abs(position_amt) <= 1e-12:
+                continue
+
+            side = "SELL" if position_amt > 0 else "BUY"
+            precision = int(qty_precision.get(symbol, 3))
+            factor = 10 ** precision
+            qty = (int(abs(position_amt) * factor)) / factor
+            if qty <= 0:
+                skipped.append({
+                    "symbol": symbol,
+                    "reason": f"quantity rounded to zero (positionAmt={position_amt})",
+                })
+                continue
+
+            payload = {
+                "symbol": symbol,
+                "side": side,
+                "type": "MARKET",
+                "quantity": qty,
+                "newOrderRespType": "RESULT",
+                "reduceOnly": "true",
+            }
+            position_side = str(row.get("positionSide", "") or "").upper()
+            if position_side in {"LONG", "SHORT"}:
+                payload["positionSide"] = position_side
+                payload.pop("reduceOnly", None)
+            orders.append(payload)
+
+        self.flatten_runs += 1
+        self.last_flatten = {
+            "ts": datetime.now().isoformat(),
+            "planned_orders": len(orders),
+            "skipped": skipped,
+        }
+        return FlattenPlan(orders=orders, skipped=skipped)
 
     def _deny(self, reason: str) -> OrderPlan:
         return OrderPlan(
