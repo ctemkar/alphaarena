@@ -155,7 +155,7 @@ try:
     HOLD_COOLDOWN_TICKS = int(os.getenv("ALPHA_HOLD_COOLDOWN_TICKS", "12"))
 except ValueError:
     HOLD_COOLDOWN_TICKS = 12
-SKIP_SELECTED_HOLD_ON_SIGNAL = os.getenv("ALPHA_SKIP_SELECTED_HOLD_ON_SIGNAL", "1").strip().lower() in {"1", "true", "yes", "on"}
+SKIP_SELECTED_HOLD_ON_SIGNAL = os.getenv("ALPHA_SKIP_SELECTED_HOLD_ON_SIGNAL", "0").strip().lower() in {"1", "true", "yes", "on"}
 try:
     HOLD_SCORE_PENALTY = float(os.getenv("ALPHA_HOLD_SCORE_PENALTY", "8.0"))
 except ValueError:
@@ -804,6 +804,8 @@ class ArenaState:
     def _desk_symbols(self, desk: str) -> list[str]:
         if desk == "basket":
             return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
+        if desk == "btc" and self.allow_cross_symbol_fallback:
+            return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
         return ["BTCUSDT"]
 
     def _symbol_min_notional_usd(self, symbol: str) -> float:
@@ -1003,13 +1005,19 @@ class ArenaState:
 
     def _place_live_market_order(self, symbol: str, side: str, quote_usd: float) -> dict:
         """Place a USDT-M Futures market order. side='BUY'=long, 'SELL'=short."""
-        order_usd = max(5.0, min(quote_usd, self.max_order_usd))
+        symbol_min_usd = self._symbol_min_notional_usd(symbol)
+        effective_max_usd = max(self.max_order_usd, symbol_min_usd)
+        order_usd = max(symbol_min_usd, min(quote_usd, effective_max_usd))
         price_key = _SYMBOL_PRICE_KEY.get(symbol, "btc")
         price = self.prices.get(price_key, 1.0)
         precision = _FUTURES_QTY_PRECISION.get(symbol, 3)
         raw_qty = order_usd / price
         factor = 10 ** precision
-        qty = math.floor(raw_qty * factor) / factor
+        min_qty = 1.0 / factor
+        qty = math.floor(raw_qty * factor + 1e-9) / factor
+        # If budget satisfies min notional, force at least one valid lot step.
+        if order_usd + 1e-9 >= symbol_min_usd and qty < min_qty:
+            qty = min_qty
         if qty <= 0:
             min_notional_for_step = price / factor
             raise RuntimeError(
@@ -1617,7 +1625,14 @@ class ArenaState:
             with self.lock:
                 self.add_log(f"{model_name} LIVE precheck failed: {exc}")
             return False
-        effective_order_usd = max(total_order_usd, 0.0)
+        min_exec_usd = self._global_execution_min_notional_usd()
+        effective_order_usd = max(total_order_usd, min_exec_usd)
+        effective_max_order_usd = max(self.max_order_usd, min_exec_usd)
+        if effective_order_usd > total_order_usd + 1e-9:
+            with self.lock:
+                self.add_log(
+                    f"{model_name} LIVE auto-floor: configured ${total_order_usd:.2f} -> executable ${effective_order_usd:.2f}"
+                )
 
         # Interpret ALPHA_LIVE_ORDER_USD as total notional per signal and
         # allocate only across symbols that can satisfy min notional/lot constraints.
@@ -1665,7 +1680,7 @@ class ArenaState:
             if allocations and remaining_fb > 0:
                 per_symbol_extra = remaining_fb / len(allocations)
                 for symbol in allocations:
-                    allocations[symbol] = min(allocations[symbol] + per_symbol_extra, self.max_order_usd)
+                    allocations[symbol] = min(allocations[symbol] + per_symbol_extra, effective_max_order_usd)
 
             if not allocations:
                 with self.lock:
@@ -1684,7 +1699,7 @@ class ArenaState:
         if remaining > 0:
             per_symbol_extra = remaining / len(allocations)
             for symbol in allocations:
-                allocations[symbol] = min(allocations[symbol] + per_symbol_extra, self.max_order_usd)
+                allocations[symbol] = min(allocations[symbol] + per_symbol_extra, effective_max_order_usd)
 
         now_epoch = time.time()
         filtered_allocations: dict[str, float] = {}
@@ -1738,12 +1753,19 @@ class ArenaState:
     ) -> bool:
         with self.lock:
             mode = self.execution_core.mode
+            min_exec_usd = self._global_execution_min_notional_usd()
+            effective_order_usd = max(self.live_order_usd, min_exec_usd)
+            effective_max_order_usd = max(self.max_order_usd, min_exec_usd)
+            if effective_order_usd > self.live_order_usd + 1e-9:
+                self.add_log(
+                    f"{model_name} CORE auto-floor: configured ${self.live_order_usd:.2f} -> executable ${effective_order_usd:.2f}"
+                )
             req = SignalRequest(
                 model_name=model_name,
                 desk=desk,
                 side_label=side_label,
-                total_order_usd=self.live_order_usd,
-                max_order_usd=self.max_order_usd,
+                total_order_usd=effective_order_usd,
+                max_order_usd=effective_max_order_usd,
                 live_trading=self.live_trading,
                 require_live_feed=self.require_live_feed,
                 live_feed=self.live_feed,
