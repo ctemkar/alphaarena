@@ -57,6 +57,8 @@
         .desk-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
         .desk-header h2 { margin: 0; font-size: 20px; font-weight: 500; }
         .desk-price { font-size: 17px; color: #848e9c; }
+        .desk-heading-price { color:#9aa3b2; font-size:18px; font-weight:500; margin-left:10px; }
+        .desk-meta-label { color:#848e9c; font-size:13px; text-transform:uppercase; letter-spacing:.5px; margin-right:6px; }
         .desk-pnl-badge { font-size: 18px; font-weight: 500; }
         /* chips left, chart right */
         .desk-body { display: grid; grid-template-columns: 1fr 380px; gap: 16px; align-items: start; }
@@ -146,10 +148,9 @@
         <!-- BTC-Only Desk -->
         <div class="desk-section">
             <div class="desk-header">
-                <h2 style="color:#f0b90b">&#x20BF; BTC-Only Desk</h2>
+                <h2 style="color:#f0b90b">&#x20BF; BTC-Only Desk <span id="btc-price-desk" class="desk-heading-price">$--</span></h2>
                 <div style="text-align:right">
-                    <div id="btc-price-desk" class="desk-price">--</div>
-                    <div id="btc-desk-pnl" class="desk-pnl-badge" style="color:#02c076">+$0.00</div>
+                    <div class="desk-pnl-badge"><span class="desk-meta-label">Desk P&amp;L</span><span id="btc-desk-pnl" style="color:#02c076">+$0.00</span></div>
                 </div>
             </div>
             <div class="desk-body">
@@ -171,10 +172,9 @@
         <!-- Basket Desk -->
         <div class="desk-section">
             <div class="desk-header">
-                <h2 style="color:#00ccff">&#x2B21; Basket Desk</h2>
+                <h2 style="color:#00ccff">&#x2B21; Basket Desk <span id="basket-price-desk" class="desk-heading-price">$--</span></h2>
                 <div style="text-align:right">
-                    <div id="basket-price-desk" class="desk-price">--</div>
-                    <div id="basket-desk-pnl" class="desk-pnl-badge" style="color:#02c076">+$0.00</div>
+                    <div class="desk-pnl-badge"><span class="desk-meta-label">Desk P&amp;L</span><span id="basket-desk-pnl" style="color:#02c076">+$0.00</span></div>
                 </div>
             </div>
             <div class="desk-body">
@@ -318,6 +318,11 @@
             if (!el) return;
             el.innerText = formatPnl(value);
             el.style.color = value > 0 ? '#02c076' : value < 0 ? '#f84960' : '#848e9c';
+        }
+
+        function applyDeskPnlText(el, value) {
+            if (!el) return;
+            applyPnlText(el, Number(value || 0));
         }
 
         function clockAgeSeconds(hms) {
@@ -508,10 +513,9 @@
             const btcPnl    = s.desk_pnl ? Number(s.desk_pnl.btc || 0) : (s.desk_equity.btc - countSelected(models, 'btc') * startBalance);
             const basketPnl = s.desk_pnl ? Number(s.desk_pnl.basket || 0) : (s.desk_equity.basket - countSelected(models, 'basket') * startBalance);
             const strictLive = !!(s.status && s.status.no_simulation && s.status.mode === 'LIVE');
-
-            applyPnlText(btcDeskPnlEl, btcPnl);
             if (basketPriceDeskEl) basketPriceDeskEl.innerText = '$' + Number(s.prices.basket).toLocaleString(undefined, { maximumFractionDigits: 2 });
-            applyPnlText(basketDeskPnlEl, basketPnl);
+            let btcDeskDisplayPnl = btcPnl;
+            let basketDeskDisplayPnl = basketPnl;
 
             // Split models into groups
             const btcSelected    = names.filter(n => models[n].desk_state && models[n].desk_state.btc && models[n].desk_state.btc.selected);
@@ -580,6 +584,8 @@
                 const basketDelta = (basketPrevPrice === null) ? 0 : (basketPx - basketPrevPrice);
                 btcPrevPrice = btcPx;
                 basketPrevPrice = basketPx;
+                btcDeskDisplayPnl = btcDelta;
+                basketDeskDisplayPnl = basketDelta;
                 pushChartPoint(btcChart, s.ts, btcDelta);
                 pushChartPoint(basketChart, s.ts, basketDelta);
             } else {
@@ -588,6 +594,9 @@
                 pushChartPoint(btcChart, s.ts, btcPnl);
                 pushChartPoint(basketChart, s.ts, basketPnl);
             }
+
+            applyDeskPnlText(btcDeskPnlEl, btcDeskDisplayPnl);
+            applyDeskPnlText(basketDeskPnlEl, basketDeskDisplayPnl);
         }
 
         async function postAction(path, model, extra) {

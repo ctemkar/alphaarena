@@ -22,7 +22,7 @@ PORT = 8000
 START_BALANCE = 10_000.0
 MAX_LOGS = 60
 TICK_SECONDS = 3.0
-HARD_MAX_ORDER_USD = 5.0
+HARD_MAX_ORDER_USD = 10.0
 OLLAMA_URL = "http://127.0.0.1:11434"
 try:
     OLLAMA_REQUEST_TIMEOUT_SECONDS = float(os.getenv("ALPHA_OLLAMA_TIMEOUT_SECONDS", "20"))
@@ -85,13 +85,13 @@ except ValueError:
     ANALYTICS_SLIPPAGE_BPS = 5.0
 
 try:
-    LIVE_ORDER_USD = float(os.getenv("ALPHA_LIVE_ORDER_USD", "5"))
+    LIVE_ORDER_USD = float(os.getenv("ALPHA_LIVE_ORDER_USD", "10"))
 except ValueError:
-    LIVE_ORDER_USD = 5.0
+    LIVE_ORDER_USD = 10.0
 try:
-    MAX_ORDER_USD = float(os.getenv("ALPHA_MAX_ORDER_USD", "5"))
+    MAX_ORDER_USD = float(os.getenv("ALPHA_MAX_ORDER_USD", "10"))
 except ValueError:
-    MAX_ORDER_USD = 5.0
+    MAX_ORDER_USD = 10.0
 try:
     DAILY_LOSS_LIMIT_USD = float(os.getenv("ALPHA_DAILY_LOSS_LIMIT_USD", "100"))
 except ValueError:
