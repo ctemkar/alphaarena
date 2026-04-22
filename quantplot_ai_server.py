@@ -5,6 +5,7 @@ import os
 import queue
 import random
 import math
+import subprocess
 import shutil
 import threading
 import time
@@ -29,6 +30,10 @@ try:
     OLLAMA_REQUEST_TIMEOUT_SECONDS = float(os.getenv("ALPHA_OLLAMA_TIMEOUT_SECONDS", "60"))
 except ValueError:
     OLLAMA_REQUEST_TIMEOUT_SECONDS = 60.0
+try:
+    PUTER_REQUEST_TIMEOUT_SECONDS = float(os.getenv("ALPHA_PUTER_TIMEOUT_SECONDS", "75"))
+except ValueError:
+    PUTER_REQUEST_TIMEOUT_SECONDS = 75.0
 try:
     OLLAMA_NUM_WORKERS = int(os.getenv("ALPHA_OLLAMA_NUM_WORKERS", "3"))
 except ValueError:
@@ -78,6 +83,7 @@ def _load_dotenv(path: str = ".env") -> None:
 _load_dotenv()
 BINANCE_API_KEY = os.getenv("EXCH_BINANCE_API_KEY", "") or os.getenv("BINANCE_KEY", "")
 BINANCE_API_SECRET = os.getenv("EXCH_BINANCE_API_SECRET", "") or os.getenv("BINANCE_SECRET", "")
+PUTER_AUTH_TOKEN = os.getenv("PUTER_AUTH_TOKEN", "") or os.getenv("puterAuthToken", "")
 LIVE_TRADING_ENABLED = os.getenv("ALPHA_LIVE_TRADING", "0").strip().lower() in {"1", "true", "yes", "on"}
 USE_FUTURES = os.getenv("ALPHA_USE_FUTURES", "1").strip().lower() not in {"0", "false", "no", "off"}
 try:
@@ -126,9 +132,9 @@ STRICT_NO_SIMULATION = True
 
 AUTO_SELECT_ENABLED = os.getenv("ALPHA_AUTO_SELECT_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
 try:
-    AUTO_SELECT_TOP_N = int(os.getenv("ALPHA_AUTO_SELECT_TOP_N", "1"))
+    AUTO_SELECT_TOP_N = int(os.getenv("ALPHA_AUTO_SELECT_TOP_N", "2"))
 except ValueError:
-    AUTO_SELECT_TOP_N = 1
+    AUTO_SELECT_TOP_N = 2
 try:
     AUTO_SELECT_INTERVAL_TICKS = int(os.getenv("ALPHA_AUTO_SELECT_INTERVAL_TICKS", "5"))
 except ValueError:
@@ -137,6 +143,10 @@ try:
     HOLD_REPLACE_STREAK = int(os.getenv("ALPHA_HOLD_REPLACE_STREAK", "5"))
 except ValueError:
     HOLD_REPLACE_STREAK = 5
+try:
+    HOLD_COOLDOWN_TICKS = int(os.getenv("ALPHA_HOLD_COOLDOWN_TICKS", "12"))
+except ValueError:
+    HOLD_COOLDOWN_TICKS = 12
 SKIP_SELECTED_HOLD_ON_SIGNAL = os.getenv("ALPHA_SKIP_SELECTED_HOLD_ON_SIGNAL", "1").strip().lower() in {"1", "true", "yes", "on"}
 try:
     HOLD_SCORE_PENALTY = float(os.getenv("ALPHA_HOLD_SCORE_PENALTY", "8.0"))
@@ -175,21 +185,99 @@ except ValueError:
 # Below this threshold the market is too flat to overcome round-trip fees (~20 bps),
 # so all signals are suppressed to HOLD.  Override via ALPHA_MIN_TRADE_MOVE_PCT.
 try:
-    MIN_TRADE_MOVE_PCT = float(os.getenv("ALPHA_MIN_TRADE_MOVE_PCT", "0.04"))
+    MIN_TRADE_MOVE_PCT = float(os.getenv("ALPHA_MIN_TRADE_MOVE_PCT", "0.0"))
 except ValueError:
-    MIN_TRADE_MOVE_PCT = 0.04
+    MIN_TRADE_MOVE_PCT = 0.0
 
 # Minimum momentum needed to convert an AI HOLD into a directional tiebreaker.
-MOMENTUM_OVERRIDE_THRESHOLD_PCT = 0.05
+try:
+    MOMENTUM_OVERRIDE_THRESHOLD_PCT = float(os.getenv("ALPHA_MOMENTUM_OVERRIDE_THRESHOLD_PCT", "0.02"))
+except ValueError:
+    MOMENTUM_OVERRIDE_THRESHOLD_PCT = 0.02
 
-# Map model name  (as it appears in ARENA_DATA) -> Ollama model tag
+DISABLE_GROK_AUTO_SELECT = os.getenv("ALPHA_DISABLE_GROK_AUTO_SELECT", "1").strip().lower() in {"1", "true", "yes", "on"}
+
+# Map model name to the backing LLM target. Most are Ollama tags; Puter-backed
+# models use the `puter:` prefix and are resolved through the local JS helper.
 OLLAMA_MODELS: dict[str, str] = {
     "Mistral":     "mistral:latest",
     "Llama-3.2":   "llama3.1:latest",
     "Gemma-4":     "gemma4:latest",
     "DeepSeek-R1": "deepseek-r1:latest",
     "Qwen-2.5":    "qwen2.5-coder:latest",
+    "Llama-3.1-8B": "llama3.1:8b",
+    "DeepSeek-R1-8B": "deepseek-r1:8b",
 }
+GROK_MODEL_NAME = "Grok-4.1-Fast"
+GROK_MODEL_TAG = "puter:x-ai/grok-4-1-fast"
+
+PUTER_HELPER = Path(__file__).resolve().parent / "scripts" / "puter_grok_chat.mjs"
+
+
+def _signal_prompt(price: float, desk: str, price_history: list[dict] | None = None) -> str:
+    asset = "BTC" if desk == "btc" else "BASKET (BTC/ETH/SOL/BNB)"
+    key = "btc" if desk == "btc" else "basket"
+
+    trend_lines = []
+    move_pct = 0.0
+    if price_history and len(price_history) >= 2:
+        prices_seq = [h[key] for h in price_history if key in h]
+        if len(prices_seq) >= 2:
+            oldest = prices_seq[0]
+            move_pct = (price - oldest) / oldest * 100 if oldest else 0.0
+            direction = "up" if move_pct > 0.02 else ("down" if move_pct < -0.02 else "flat")
+            trend_lines.append(
+                f"Price trend over last ~{len(prices_seq) * 3}s: {direction} "
+                f"({move_pct:+.3f}% from ${oldest:,.2f})."
+            )
+        if len(prices_seq) >= 2:
+            tick_chg = (prices_seq[-1] - prices_seq[-2]) / prices_seq[-2] * 100 if prices_seq[-2] else 0.0
+            trend_lines.append(f"Last tick change: {tick_chg:+.4f}%.")
+
+    context = " ".join(trend_lines)
+    fee_hint = (
+        "Round-trip trading cost is ~0.08%. "
+        "Go LONG if short-term trend is up, SHORT if short-term trend is down, "
+        "and use HOLD only when price action is truly flat or mixed. "
+    )
+    return (
+        f"You are a short-term crypto trader. {asset} current price: ${price:,.2f}. "
+        + (context + " " if context else "")
+        + fee_hint
+        + "Based on this price action, should a short-term trader go LONG, SHORT, or HOLD? "
+        "Reply with exactly one word: LONG, SHORT, or HOLD."
+    )
+
+
+def _parse_signal_text(text: str) -> int:
+    normalized = (text or "").strip().upper()
+    if "LONG" in normalized:
+        return 1
+    if "SHORT" in normalized:
+        return -1
+    return 0
+
+
+def _puter_signal(model_tag: str, prompt: str) -> tuple[int, str]:
+    if not PUTER_HELPER.exists():
+        return 0, f"missing helper: {PUTER_HELPER.name}"
+    try:
+        result = subprocess.run(
+            ["node", str(PUTER_HELPER), model_tag, prompt],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=PUTER_REQUEST_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError:
+        return 0, "node unavailable"
+    except subprocess.TimeoutExpired:
+        return 0, "timeout"
+
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "puter helper failed").strip()
+        return 0, err[:140]
+    return _parse_signal_text(result.stdout), ""
 
 
 def _ollama_signal(
@@ -204,41 +292,9 @@ def _ollama_signal(
       signal   – +1 LONG, -1 SHORT, 0 HOLD
       error_str – empty string on success, reason string on failure
     """
-    asset = "BTC" if desk == "btc" else "BASKET (BTC/ETH/SOL/BNB)"
-    key = "btc" if desk == "btc" else "basket"
-
-    # Build trend context from price history
-    trend_lines = []
-    move_pct = 0.0
-    if price_history and len(price_history) >= 2:
-        prices_seq = [h[key] for h in price_history if key in h]
-        if len(prices_seq) >= 2:
-            oldest = prices_seq[0]
-            move_pct = (price - oldest) / oldest * 100 if oldest else 0.0
-            direction = "up" if move_pct > 0.02 else ("down" if move_pct < -0.02 else "flat")
-            trend_lines.append(
-                f"Price trend over last ~{len(prices_seq) * 3}s: {direction} "
-                f"({move_pct:+.3f}% from ${oldest:,.2f})."
-            )
-        # Tick-over-tick momentum (last 2 ticks)
-        if len(prices_seq) >= 2:
-            tick_chg = (prices_seq[-1] - prices_seq[-2]) / prices_seq[-2] * 100 if prices_seq[-2] else 0.0
-            trend_lines.append(f"Last tick change: {tick_chg:+.4f}%.")
-
-    context = " ".join(trend_lines)
-    # Keep guidance realistic for low-volatility windows while still allowing HOLD in flat action.
-    fee_hint = (
-        "Round-trip trading cost is ~0.08%. "
-        "Go LONG if short-term trend is up, SHORT if short-term trend is down, "
-        "and use HOLD only when price action is truly flat or mixed. "
-    )
-    prompt = (
-        f"You are a short-term crypto trader. {asset} current price: ${price:,.2f}. "
-        + (context + " " if context else "")
-        + fee_hint
-        + "Based on this price action, should a short-term trader go LONG, SHORT, or HOLD? "
-        "Reply with exactly one word: LONG, SHORT, or HOLD."
-    )
+    prompt = _signal_prompt(price, desk, price_history)
+    if ollama_tag.startswith("puter:"):
+        return _puter_signal(ollama_tag.split(":", 1)[1], prompt)
     payload = json.dumps({"model": ollama_tag, "prompt": prompt, "stream": False}).encode()
     req = urllib.request.Request(
         f"{OLLAMA_URL}/api/generate",
@@ -249,12 +305,7 @@ def _ollama_signal(
     try:
         with urllib.request.urlopen(req, timeout=OLLAMA_REQUEST_TIMEOUT_SECONDS) as resp:
             result = json.loads(resp.read().decode())
-            text = result.get("response", "").strip().upper()
-            if "LONG" in text:
-                return 1, ""
-            if "SHORT" in text:
-                return -1, ""
-            return 0, ""
+            return _parse_signal_text(result.get("response", "")), ""
     except urllib.error.URLError as exc:
         return 0, f"network: {exc.reason}"
     except TimeoutError:
@@ -300,7 +351,12 @@ class ArenaState:
             "Gemma-4":   self._mk_model("#f84960", 0.49),
             "DeepSeek-R1": self._mk_model("#3ccf91", 0.55),
             "Qwen-2.5":    self._mk_model("#4db6ff", 0.53),
+            "Llama-3.1-8B": self._mk_model("#ffd166", 0.54),
+            "DeepSeek-R1-8B": self._mk_model("#8adf5b", 0.52),
         }
+        self.puter_auth_token = PUTER_AUTH_TOKEN
+        if self.puter_auth_token:
+            self.models[GROK_MODEL_NAME] = self._mk_model("#ff6f61", 0.58)
         self.prices = {
             "btc": 84_000.0,
             "eth": 4_200.0,
@@ -360,11 +416,13 @@ class ArenaState:
         self._summary_cache = self._default_daily_summary(datetime.now().strftime("%Y-%m-%d"))
         self.tick_count = 0
         self.auto_select_enabled = AUTO_SELECT_ENABLED
-        self.auto_select_top_n = max(1, AUTO_SELECT_TOP_N)
+        self.auto_select_top_n = max(2, AUTO_SELECT_TOP_N)
         self.auto_select_interval_ticks = max(5, AUTO_SELECT_INTERVAL_TICKS)
         self.auto_select_round = 0
         self.hold_replace_streak = max(1, HOLD_REPLACE_STREAK)
+        self.hold_cooldown_ticks = max(0, HOLD_COOLDOWN_TICKS)
         self.skip_selected_hold_on_signal = SKIP_SELECTED_HOLD_ON_SIGNAL
+        self.disable_grok_auto_select = DISABLE_GROK_AUTO_SELECT
         self.hold_score_penalty = max(0.0, HOLD_SCORE_PENALTY)
         self.base_signal_chance = min(max(BASE_SIGNAL_CHANCE, 0.01), 0.95)
         self.aggressive_movement_enabled = AGGRESSIVE_MOVEMENT_ENABLED
@@ -833,6 +891,17 @@ class ArenaState:
                 "side": side,
                 "type": "MARKET",
                 "quantity": qty,
+                "newOrderRespType": "RESULT",
+            },
+            futures=True,
+        )
+
+    def _get_futures_order_status(self, symbol: str, order_id: int | str) -> dict:
+        return self._binance_signed_get(
+            "/fapi/v1/order",
+            {
+                "symbol": symbol,
+                "orderId": int(order_id),
             },
             futures=True,
         )
@@ -925,6 +994,31 @@ class ArenaState:
         except Exception:
             pass  # non-fatal; stale data is acceptable
 
+    def _model_provider_map(self) -> dict[str, str]:
+        providers = dict(OLLAMA_MODELS)
+        if self.puter_auth_token:
+            providers[GROK_MODEL_NAME] = GROK_MODEL_TAG
+        return providers
+
+    def set_puter_auth_token(self, token: str) -> bool:
+        token = (token or "").strip()
+        if token == self.puter_auth_token:
+            return False
+        self.puter_auth_token = token
+        if token:
+            os.environ["PUTER_AUTH_TOKEN"] = token
+            if GROK_MODEL_NAME not in self.models:
+                self.models[GROK_MODEL_NAME] = self._mk_model("#ff6f61", 0.58)
+            self.add_log("PUTER GROK ENABLED: auth token received")
+            return True
+
+        os.environ.pop("PUTER_AUTH_TOKEN", None)
+        if GROK_MODEL_NAME in self.models:
+            self._deselect_model_unlocked(GROK_MODEL_NAME)
+            del self.models[GROK_MODEL_NAME]
+        self.add_log("PUTER GROK DISABLED: auth token cleared")
+        return True
+
     def _live_order_startup_check(self) -> None:
         """Run once at startup: verify Binance Futures balance and API access."""
         time.sleep(2)  # let the price feed settle first
@@ -963,6 +1057,16 @@ class ArenaState:
                 avg_price = float(result.get("avgPrice") or 0)
                 executed_qty = float(result.get("executedQty") or 0)
                 cum_quote = float(result.get("cumQuote") or 0)
+                if order_id != "?" and (executed_qty <= 0 or avg_price <= 0 or cum_quote <= 0):
+                    try:
+                        status = self._get_futures_order_status(symbol, order_id)
+                        avg_price = float(status.get("avgPrice") or avg_price or 0)
+                        executed_qty = float(status.get("executedQty") or executed_qty or 0)
+                        cum_quote = float(status.get("cumQuote") or cum_quote or 0)
+                    except Exception:
+                        pass
+                if cum_quote <= 0 and executed_qty > 0 and avg_price > 0:
+                    cum_quote = executed_qty * avg_price
                 with self.lock:
                     self.add_log(f"{model_name} LIVE {symbol} {side_label} ${cum_quote:.2f} @ {avg_price:.4f} (order {order_id})")
                     if avg_price > 0 and executed_qty > 0:
@@ -1006,8 +1110,10 @@ class ArenaState:
                         action = 1 if move_pct > 0 else -1
                 # Flat-market gate: suppress directional signals when market isn't moving enough to
                 # overcome round-trip fees (~20 bps).  Forces HOLD in choppy/sideways conditions.
+                suppressed_by_move_gate = False
                 if action != 0 and abs(move_pct) < MIN_TRADE_MOVE_PCT:
                     action = 0
+                    suppressed_by_move_gate = True
                 
                 live_desk = desk_key
                 live_side = "HOLD"
@@ -1022,6 +1128,11 @@ class ArenaState:
                         self.add_log(f"{name} [{desk_key.upper()}]: signal skipped (desk paused)")
                         continue
                     side = "LONG" if action == 1 else ("SHORT" if action == -1 else "HOLD")
+                    if suppressed_by_move_gate:
+                        self.add_log(
+                            f"{name} [{desk_key.upper()}]: directional signal suppressed "
+                            f"(move {move_pct:+.4f}% < min {MIN_TRADE_MOVE_PCT:.4f}%)"
+                        )
                     hard_live_block = self.live_blocked and "Insufficient USDT" not in self.live_blocked_reason
                     if self.live_trading and hard_live_block and side in {"LONG", "SHORT"}:
                         side = "HOLD"
@@ -1029,9 +1140,15 @@ class ArenaState:
                     slot["last_signal"] = side
                     if side == "HOLD":
                         slot["hold_streak"] = int(slot.get("hold_streak", 0)) + 1
+                        if self.hold_cooldown_ticks > 0:
+                            slot["hold_cooldown_until_tick"] = max(
+                                int(slot.get("hold_cooldown_until_tick", 0)),
+                                self.tick_count + self.hold_cooldown_ticks,
+                            )
                         slot["hold_signals"] = int(slot.get("hold_signals", 0)) + 1
-                        # HOLD closes the open trade and flattens position.
-                        self._close_trade_if_open(name, desk_key, slot, "hold_signal", ref_price)
+                        # In strict live mode, avoid simulated trade closes; real fills drive PnL.
+                        if not (self.strict_no_simulation and self.live_trading):
+                            self._close_trade_if_open(name, desk_key, slot, "hold_signal", ref_price)
                         slot["pos"] = 0.0
                         # Immediately trigger auto-select to replace this HOLD model
                         if self.auto_select_enabled and (
@@ -1041,10 +1158,13 @@ class ArenaState:
                             self._auto_select_models()
                     else:
                         slot["hold_streak"] = 0
+                        slot["hold_cooldown_until_tick"] = 0
                         slot["directional_signals"] = int(slot.get("directional_signals", 0)) + 1
-                        slot["pos"] = action * (slot["balance"] / max(ref_price, 1.0)) * self._position_scale(desk_key)
-                        slot["entry"] = ref_price
-                        self._roll_trade_on_signal(name, desk_key, slot, side, ref_price, "signal_flip")
+                        # In strict live mode, do not open simulated trades ahead of real execution.
+                        if not (self.strict_no_simulation and self.live_trading):
+                            slot["pos"] = action * (slot["balance"] / max(ref_price, 1.0)) * self._position_scale(desk_key)
+                            slot["entry"] = ref_price
+                            self._roll_trade_on_signal(name, desk_key, slot, side, ref_price, "signal_flip")
                     desk = desk_key.upper()
                     live_side = side
                     self.add_log(f"{name} [{desk}]: {side} @ ${ref_price:,.2f} [AI]")
@@ -1233,6 +1353,7 @@ class ArenaState:
             "signal_source": "none",  # 'none' | 'ai'
             "last_signal": "IDLE",   # LONG | SHORT | HOLD | IDLE
             "hold_streak": 0,
+            "hold_cooldown_until_tick": 0,
             "hold_signals": 0,
             "directional_signals": 0,
             "trade_side": "FLAT",    # FLAT | LONG | SHORT
@@ -1442,7 +1563,7 @@ class ArenaState:
         self.add_log(f"{name} selected to {assigned_desk.upper()} desk @ ${ref_price:,.2f} (generating first signal)")
         
         # Queue first signal for sequential Ollama processing (no concurrent inference)
-        ollama_tag = OLLAMA_MODELS.get(name)
+        ollama_tag = self._model_provider_map().get(name)
         pending_key = (name, assigned_desk)
         if ollama_tag and pending_key not in self.ollama_signal_pending:
             self.ollama_signal_pending.add(pending_key)
@@ -1482,19 +1603,25 @@ class ArenaState:
         if not self.auto_select_enabled:
             return
         model_names = list(self.models.keys())
-        model_count = len(model_names)
+        auto_select_names = [
+            nm for nm in model_names
+            if not (self.disable_grok_auto_select and nm == GROK_MODEL_NAME)
+        ]
+        if not auto_select_names:
+            auto_select_names = model_names
+        model_count = len(auto_select_names)
         if model_count == 0:
             return
         round_idx = self.auto_select_round % model_count
         self.auto_select_round += 1
-        model_index = {nm: i for i, nm in enumerate(model_names)}
+        model_index = {nm: i for i, nm in enumerate(auto_select_names)}
         top_n = min(max(1, self.auto_select_top_n), model_count)
         
         # First pass: select models for each desk independently
         desk_selections = {}
         for desk in ("btc", "basket"):
             forced_rotate: set[str] = set()
-            for nm in self.models.keys():
+            for nm in auto_select_names:
                 slot = self.models[nm]["desk_state"][desk]
                 if not slot.get("selected"):
                     continue
@@ -1503,15 +1630,24 @@ class ArenaState:
                     continue
                 if int(slot.get("hold_streak", 0)) >= self.hold_replace_streak:
                     forced_rotate.add(nm)
+                    continue
+                if int(slot.get("hold_cooldown_until_tick", 0)) > self.tick_count:
+                    forced_rotate.add(nm)
             ranked = sorted(
-                model_names,
+                auto_select_names,
                 key=lambda nm: (
                     self._model_score(nm, desk),
                     -((model_index[nm] - round_idx) % model_count),
                 ),
                 reverse=True,
             )
-            ranked_pool = [nm for nm in ranked if nm not in forced_rotate]
+            ranked_pool = [
+                nm for nm in ranked
+                if nm not in forced_rotate
+                and int(self.models[nm]["desk_state"][desk].get("hold_cooldown_until_tick", 0)) <= self.tick_count
+            ]
+            if not ranked_pool:
+                ranked_pool = [nm for nm in ranked if nm not in forced_rotate]
             desk_selections[desk] = {
                 "ranked": ranked,
                 "ranked_pool": ranked_pool,
@@ -1545,8 +1681,14 @@ class ArenaState:
                 selected = self.models[nm]["desk_state"][desk]["selected"]
                 if selected and (nm not in sel["winners"] or nm in sel["forced_rotate"]):
                     if nm in sel["forced_rotate"]:
+                        slot = self.models[nm]["desk_state"][desk]
+                        cooldown_until = int(slot.get("hold_cooldown_until_tick", 0))
+                        if cooldown_until > self.tick_count:
+                            reason = f"HOLD cooldown until tick {cooldown_until}"
+                        else:
+                            reason = f"HOLD streak {slot.get('hold_streak', 0)}"
                         self.add_log(
-                            f"AUTO-SELECT {desk.upper()}: rotating out {nm} after HOLD streak {self.models[nm]['desk_state'][desk].get('hold_streak', 0)}"
+                            f"AUTO-SELECT {desk.upper()}: rotating out {nm} ({reason})"
                         )
                     self._deselect_model_unlocked(nm, desk)
             for nm in sel["ranked_pool"]:
@@ -1713,7 +1855,7 @@ class ArenaState:
                 # Trade cadence adapts to movement regime (normal vs aggressive).
                 should_trade = slot["selected"] and random.random() < self._signal_chance(desk)
                 if should_trade:
-                    ollama_tag = OLLAMA_MODELS.get(name)
+                    ollama_tag = self._model_provider_map().get(name)
                     if ollama_tag:
                         # Queue only if no request is already pending for this model/desk.
                         pending_key = (name, desk)
@@ -1750,6 +1892,11 @@ class ArenaState:
             slot["last_signal"] = side
             if side == "HOLD":
                 slot["hold_streak"] = int(slot.get("hold_streak", 0)) + 1
+                if self.hold_cooldown_ticks > 0:
+                    slot["hold_cooldown_until_tick"] = max(
+                        int(slot.get("hold_cooldown_until_tick", 0)),
+                        self.tick_count + self.hold_cooldown_ticks,
+                    )
                 slot["hold_signals"] = int(slot.get("hold_signals", 0)) + 1
                 # HOLD closes the open trade and flattens position.
                 self._close_trade_if_open(name, desk_key, slot, "hold_signal", ref_price)
@@ -1757,6 +1904,7 @@ class ArenaState:
                 slot["mark_price"] = ref_price
             else:
                 slot["hold_streak"] = 0
+                slot["hold_cooldown_until_tick"] = 0
                 slot["directional_signals"] = int(slot.get("directional_signals", 0)) + 1
                 slot["pos"] = action * (slot["balance"] / max(ref_price, 1.0)) * self._position_scale(desk_key)
                 slot["entry"] = ref_price
@@ -1881,7 +2029,8 @@ class ArenaState:
                     "aggressive_move_pct": self.aggressive_move_pct,
                     "aggressive_now_btc": self._is_aggressive_movement("btc"),
                     "aggressive_now_basket": self._is_aggressive_movement("basket"),
-                    "ollama_models": list(OLLAMA_MODELS.keys()),
+                    "ollama_models": list(self._model_provider_map().keys()),
+                    "puter_grok_enabled": bool(self.puter_auth_token),
                 },
                 "desk_equity": {
                     "btc": btc_equity,
@@ -1955,6 +2104,7 @@ class ArenaHandler(SimpleHTTPRequestHandler):
             "/api/auto-select",
             "/api/desks/clear",
             "/api/away-mode",
+            "/api/puter-token",
             "/api/message/pnl-health",
             "/api/message/recent-summary",
         }:
@@ -2019,6 +2169,19 @@ class ArenaHandler(SimpleHTTPRequestHandler):
                 return
             changed = self.state.set_away_mode(enabled_raw)
             self._json(200, {"ok": True, "changed": changed, "away_mode": bool(enabled_raw)})
+            return
+
+        if self.path == "/api/puter-token":
+            token_raw = data.get("token", "")
+            if token_raw is not None and not isinstance(token_raw, str):
+                self._json(400, {"ok": False, "error": "token must be a string"})
+                return
+            changed = self.state.set_puter_auth_token(token_raw or "")
+            self._json(200, {
+                "ok": True,
+                "changed": changed,
+                "puter_grok_enabled": bool(self.state.puter_auth_token),
+            })
             return
 
         if self.path == "/api/message/pnl-health":

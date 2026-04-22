@@ -1,0 +1,8 @@
+{
+  "name": "alphaarena-puter-helper",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@heyputer/puter.js": "^2.2.15"
+  }
+}

@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <title>QuantPlot AI | Trading</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://js.puter.com/v2/"></script>
     <style>
         body { font-family: 'Inter', sans-serif; background: #0b0e11; color: #eaecef; margin: 0; padding: 24px; box-sizing: border-box; font-size: 18px; font-weight: 400; }
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #2b2f36; padding-bottom: 16px; }
@@ -134,6 +135,7 @@
 
     <div class="control-row">
         <button id="auto-select-btn" class="pause-btn">Disable Auto-Select</button>
+        <button id="enable-grok-btn" class="pause-btn">Enable Grok via Puter</button>
         <button id="clear-desks-btn" class="pause-btn">Clear All Models</button>
         <button id="away-mode-btn" class="pause-btn">Away Mode: OFF</button>
         <button id="pause-all-btn" class="pause-btn">Pause Both Desks</button>
@@ -263,6 +265,7 @@
         const liveBlockedReason = document.getElementById('live-blocked-reason');
         const llmReportBody   = document.getElementById('llm-report-body');
         const autoSelectBtn   = document.getElementById('auto-select-btn');
+        const enableGrokBtn   = document.getElementById('enable-grok-btn');
         const clearDesksBtn   = document.getElementById('clear-desks-btn');
         const awayModeBtn     = document.getElementById('away-mode-btn');
         const pauseAllBtn     = document.getElementById('pause-all-btn');
@@ -452,6 +455,7 @@
         function renderPauseButtons(s) {
             const st = s.status || {};
             const autoSelectEnabled = !!st.auto_select_enabled;
+            const grokEnabled = !!st.puter_grok_enabled;
             const awayModeEnabled = !!st.away_mode;
             const allPaused = !!st.pause_all_desks;
             const btcPaused = !!st.pause_btc;
@@ -459,6 +463,10 @@
             if (autoSelectBtn) {
                 autoSelectBtn.innerText = autoSelectEnabled ? 'Disable Auto-Select' : 'Enable Auto-Select';
                 autoSelectBtn.classList.toggle('paused', !autoSelectEnabled);
+            }
+            if (enableGrokBtn) {
+                enableGrokBtn.innerText = grokEnabled ? 'Grok via Puter: ON' : 'Enable Grok via Puter';
+                enableGrokBtn.classList.toggle('paused', grokEnabled);
             }
             if (awayModeBtn) {
                 awayModeBtn.innerText = awayModeEnabled ? 'Away Mode: ON (Trading Active)' : 'Away Mode: OFF';
@@ -693,6 +701,50 @@
             await refreshState();
         }
 
+        async function waitForPuterAuthToken(timeoutMs = 60000) {
+            const started = Date.now();
+            while (Date.now() - started < timeoutMs) {
+                const token = (window.puter && window.puter.authToken) ? String(window.puter.authToken).trim() : '';
+                if (token) return token;
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
+            return '';
+        }
+
+        async function enableGrokViaPuter() {
+            if (!window.puter || !window.puter.ai) {
+                alert('Puter.js did not load.');
+                return;
+            }
+            if (enableGrokBtn) {
+                enableGrokBtn.disabled = true;
+                enableGrokBtn.innerText = 'Authorizing Puter...';
+            }
+            try {
+                await window.puter.ai.chat('Reply with exactly one word: HOLD', { model: 'x-ai/grok-4-1-fast' });
+            } catch (_) {
+                // Browser auth/login can still complete even if this initial probe throws.
+            }
+
+            const token = await waitForPuterAuthToken();
+            if (!token) {
+                alert('Puter authentication did not complete. Finish the Puter login flow in the browser and try again.');
+                await refreshState();
+                return;
+            }
+
+            const response = await fetch('/api/puter-token', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token })
+            });
+            const payload = await response.json();
+            if (!response.ok || !payload.ok) {
+                alert('Failed to enable Grok via Puter.');
+            }
+            await refreshState();
+        }
+
         async function clearAllDesks() {
             const ok = confirm('Remove all selected models from both desks now?');
             if (!ok) return;
@@ -770,6 +822,7 @@
             const st = (state && state.status) ? state.status : {};
             await setAutoSelect(!st.auto_select_enabled);
         });
+        enableGrokBtn.addEventListener('click', enableGrokViaPuter);
         clearDesksBtn.addEventListener('click', clearAllDesks);
         awayModeBtn.addEventListener('click', async () => {
             const st = (state && state.status) ? state.status : {};
