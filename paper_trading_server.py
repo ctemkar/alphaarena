@@ -25,9 +25,13 @@ TICK_SECONDS = 3.0
 HARD_MAX_ORDER_USD = 10.0
 OLLAMA_URL = "http://127.0.0.1:11434"
 try:
-    OLLAMA_REQUEST_TIMEOUT_SECONDS = float(os.getenv("ALPHA_OLLAMA_TIMEOUT_SECONDS", "20"))
+    OLLAMA_REQUEST_TIMEOUT_SECONDS = float(os.getenv("ALPHA_OLLAMA_TIMEOUT_SECONDS", "60"))
 except ValueError:
-    OLLAMA_REQUEST_TIMEOUT_SECONDS = 20.0
+    OLLAMA_REQUEST_TIMEOUT_SECONDS = 60.0
+try:
+    OLLAMA_NUM_WORKERS = int(os.getenv("ALPHA_OLLAMA_NUM_WORKERS", "3"))
+except ValueError:
+    OLLAMA_NUM_WORKERS = 3
 BINANCE_BASE_URL     = "https://api.binance.com"       # Spot (not used for trading)
 BINANCE_FUTURES_URL  = "https://fapi.binance.com"      # USDT-M Perpetual Futures
 
@@ -115,11 +119,11 @@ try:
 except ValueError:
     AUTO_SELECT_TOP_N = 4
 try:
-    AUTO_SELECT_INTERVAL_TICKS = int(os.getenv("ALPHA_AUTO_SELECT_INTERVAL_TICKS", "20"))
+    AUTO_SELECT_INTERVAL_TICKS = int(os.getenv("ALPHA_AUTO_SELECT_INTERVAL_TICKS", "5"))
 except ValueError:
     AUTO_SELECT_INTERVAL_TICKS = 20
 try:
-    HOLD_REPLACE_STREAK = int(os.getenv("ALPHA_HOLD_REPLACE_STREAK", "2"))
+    HOLD_REPLACE_STREAK = int(os.getenv("ALPHA_HOLD_REPLACE_STREAK", "1"))
 except ValueError:
     HOLD_REPLACE_STREAK = 2
 try:
@@ -127,9 +131,9 @@ try:
 except ValueError:
     HOLD_SCORE_PENALTY = 8.0
 try:
-    BASE_SIGNAL_CHANCE = float(os.getenv("ALPHA_BASE_SIGNAL_CHANCE", "0.12"))
+    BASE_SIGNAL_CHANCE = float(os.getenv("ALPHA_BASE_SIGNAL_CHANCE", "0.08"))
 except ValueError:
-    BASE_SIGNAL_CHANCE = 0.12
+    BASE_SIGNAL_CHANCE = 0.08
 
 AGGRESSIVE_MOVEMENT_ENABLED = os.getenv("ALPHA_AGGRESSIVE_MOVEMENT_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
 try:
@@ -321,15 +325,16 @@ class ArenaState:
         self.aggressive_position_multiplier = min(max(AGGRESSIVE_POSITION_MULTIPLIER, 1.0), 2.0)
         self.logs = []
         self.server_started_at = datetime.now().isoformat()
-        # Queue for sequential Ollama signal generation (no concurrent inference)
+        # Queue for Ollama signal generation (parallel workers to avoid bottleneck)
         self.ollama_signal_queue: queue.Queue[tuple[str, str, str, float]] = queue.Queue()
         self.ollama_signal_pending: set[tuple[str, str]] = set()
         self.recalc_basket()
         if self.live_trading:
             threading.Thread(target=self._live_order_startup_check, daemon=True).start()
             threading.Thread(target=self._live_order_worker, daemon=True).start()
-        # Always start Ollama signal worker for sequential inference
-        threading.Thread(target=self._ollama_signal_worker, daemon=True).start()
+        # Start multiple parallel Ollama signal workers (OLLAMA_NUM_WORKERS threads)
+        for _ in range(OLLAMA_NUM_WORKERS):
+            threading.Thread(target=self._ollama_signal_worker, daemon=True).start()
 
     @staticmethod
     def _default_daily_summary(day: str) -> dict:
@@ -778,7 +783,7 @@ class ArenaState:
                 time.sleep(0.2)
 
     def _ollama_signal_worker(self) -> None:
-        """Processes Ollama signal requests sequentially to avoid concurrent inference overload."""
+        """Processes Ollama signal requests in parallel (multiple workers)."""
         while True:
             name, desk_key, ollama_tag, ref_price = self.ollama_signal_queue.get()
             pending_key = (name, desk_key)
@@ -787,13 +792,16 @@ class ArenaState:
                 action, err = _ollama_signal(ollama_tag, ref_price, desk_key, history)
                 if err:
                     with self.lock:
-                        self.add_log(f"{name} [{desk_key.upper()}]: LLM error — {err} (treated as HOLD)")
-
-                # Basket desk can become overly HOLD-heavy because its composite
-                # price moves are smoother. If AI is neutral without an error,
-                # use tiny momentum as a directional tiebreaker.
-                if desk_key == "basket" and action == 0 and not err:
-                    move_pct = self._desk_recent_move_pct("basket")
+                        self.add_log(f"{name} [{desk_key.upper()}]: LLM error — {err} (using momentum fallback)")
+                    # Momentum-based fallback for errors: use recent price movement to avoid HOLD
+                    move_pct = self._desk_recent_move_pct(desk_key)
+                    if abs(move_pct) >= 0.01:
+                        action = 1 if move_pct > 0 else -1
+                    else:
+                        action = 0  # Still HOLD if no clear momentum
+                # If AI is neutral (action == 0), use tiny momentum as a directional tiebreaker
+                elif action == 0:
+                    move_pct = self._desk_recent_move_pct(desk_key)
                     if abs(move_pct) >= 0.01:
                         action = 1 if move_pct > 0 else -1
                 
@@ -821,6 +829,9 @@ class ArenaState:
                         # HOLD closes the open trade and flattens position.
                         self._close_trade_if_open(name, desk_key, slot, "hold_signal", ref_price)
                         slot["pos"] = 0.0
+                        # Immediately trigger auto-select to replace this HOLD model
+                        if self.auto_select_enabled and slot["hold_streak"] >= self.hold_replace_streak:
+                            self._auto_select_models()
                     else:
                         slot["hold_streak"] = 0
                         slot["directional_signals"] = int(slot.get("directional_signals", 0)) + 1
@@ -1397,17 +1408,30 @@ class ArenaState:
             basket_equity = sum(m["desk_state"]["basket"]["balance"] for m in self.models.values() if m["desk_state"]["basket"]["selected"])
             btc_pnl = sum(
                 m["desk_state"]["btc"].get("realized_pnl", 0.0)
-                + (m["desk_state"]["btc"]["balance"] - START_BALANCE if m["desk_state"]["btc"]["selected"] else 0.0)
+                + (m["desk_state"]["btc"]["balance"] - START_BALANCE)
                 for m in self.models.values()
+                if m["desk_state"]["btc"]["selected"]
             )
             basket_pnl = sum(
                 m["desk_state"]["basket"].get("realized_pnl", 0.0)
-                + (m["desk_state"]["basket"]["balance"] - START_BALANCE if m["desk_state"]["basket"]["selected"] else 0.0)
+                + (m["desk_state"]["basket"]["balance"] - START_BALANCE)
                 for m in self.models.values()
+                if m["desk_state"]["basket"]["selected"]
             )
             app_total_pnl = btc_pnl + basket_pnl
             if self.strict_no_simulation and self.binance_pnl.get("available"):
-                app_total_pnl = float(self.binance_pnl.get("equity_delta_usd", 0.0) or 0.0)
+                binance_total = float(self.binance_pnl.get("equity_delta_usd", 0.0) or 0.0)
+                internal_total = btc_pnl + basket_pnl
+                # Scale internal desk P&Ls to match Binance, preserving their ratio
+                if abs(internal_total) > 1e-6:  # Only scale if internal total is not essentially zero
+                    scale = binance_total / internal_total
+                    btc_pnl = btc_pnl * scale
+                    basket_pnl = basket_pnl * scale
+                else:
+                    # If internal is essentially zero, both desks get zero
+                    btc_pnl = 0.0
+                    basket_pnl = 0.0
+                app_total_pnl = binance_total
             # Per-model performance stats aggregated across both desks.
             model_stats = {}
             for nm, mm in self.models.items():

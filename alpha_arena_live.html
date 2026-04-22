@@ -577,23 +577,10 @@
             logBtcEl.innerHTML    = btcLogs.map(msg    => '<div>' + msg + '</div>').join('');
             logBasketEl.innerHTML = basketLogs.map(msg => '<div>' + msg + '</div>').join('');
 
-            if (strictLive) {
-                const btcPx = Number(s.prices.btc || 0);
-                const basketPx = Number(s.prices.basket || 0);
-                const btcDelta = (btcPrevPrice === null) ? 0 : (btcPx - btcPrevPrice);
-                const basketDelta = (basketPrevPrice === null) ? 0 : (basketPx - basketPrevPrice);
-                btcPrevPrice = btcPx;
-                basketPrevPrice = basketPx;
-                btcDeskDisplayPnl = btcDelta;
-                basketDeskDisplayPnl = basketDelta;
-                pushChartPoint(btcChart, s.ts, btcDelta);
-                pushChartPoint(basketChart, s.ts, basketDelta);
-            } else {
-                btcPrevPrice = null;
-                basketPrevPrice = null;
-                pushChartPoint(btcChart, s.ts, btcPnl);
-                pushChartPoint(basketChart, s.ts, basketPnl);
-            }
+            btcPrevPrice = null;
+            basketPrevPrice = null;
+            pushChartPoint(btcChart, s.ts, btcPnl);
+            pushChartPoint(basketChart, s.ts, basketPnl);
 
             applyDeskPnlText(btcDeskPnlEl, btcDeskDisplayPnl);
             applyDeskPnlText(basketDeskPnlEl, basketDeskDisplayPnl);
