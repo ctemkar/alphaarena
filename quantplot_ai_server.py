@@ -186,6 +186,8 @@ OLLAMA_MODELS: dict[str, str] = {
     "Mistral":     "mistral:latest",
     "Llama-3.2":   "llama3.1:latest",
     "Gemma-4":     "gemma4:latest",
+    "DeepSeek-R1": "deepseek-r1:latest",
+    "Qwen-2.5":    "qwen2.5-coder:latest",
 }
 
 
@@ -295,6 +297,8 @@ class ArenaState:
             "Mistral":   self._mk_model("#d58bff", 0.60),
             "Llama-3.2": self._mk_model("#ffaa44", 0.57),
             "Gemma-4":   self._mk_model("#f84960", 0.49),
+            "DeepSeek-R1": self._mk_model("#3ccf91", 0.55),
+            "Qwen-2.5":    self._mk_model("#4db6ff", 0.53),
         }
         self.prices = {
             "btc": 84_000.0,
