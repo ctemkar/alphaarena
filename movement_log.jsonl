@@ -14687,3 +14687,11 @@
 {"type":"pnl","model":"Qwen-3","desk":"basket","price":45113.52,"pos":0.08868316,"pnl_delta":0.063852,"balance":10000.071833,"ts":"2026-04-22T08:27:18.379896"}
 {"type":"pnl","model":"Qwen-2.5-Coder","desk":"basket","price":45113.52,"pos":0.08868316,"pnl_delta":0.063852,"balance":10000.071833,"ts":"2026-04-22T08:27:18.380241"}
 {"type":"pnl","model":"Qwen3-Coder","desk":"basket","price":45113.52,"pos":0.08868316,"pnl_delta":0.063852,"balance":10000.071833,"ts":"2026-04-22T08:27:18.380494"}
+{"type":"price","btc":76206.97,"eth":2316.95,"sol":86.37,"bnb":631.62,"basket":45112.74,"feed":"live","ts":"2026-04-22T08:27:21.524725"}
+{"type":"pnl","model":"Qwen-3","desk":"basket","price":45112.74,"pos":0.08868316,"pnl_delta":-0.069173,"balance":10000.00266,"ts":"2026-04-22T08:27:21.525031"}
+{"type":"pnl","model":"Qwen-2.5-Coder","desk":"basket","price":45112.74,"pos":0.08868316,"pnl_delta":-0.069173,"balance":10000.00266,"ts":"2026-04-22T08:27:21.525239"}
+{"type":"pnl","model":"Qwen3-Coder","desk":"basket","price":45112.74,"pos":0.08868316,"pnl_delta":-0.069173,"balance":10000.00266,"ts":"2026-04-22T08:27:21.525392"}
+{"type":"price","btc":76206.97,"eth":2316.96,"sol":86.38,"bnb":631.63,"basket":45113.72,"feed":"live","ts":"2026-04-22T08:27:24.676330"}
+{"type":"pnl","model":"Qwen-3","desk":"basket","price":45113.72,"pos":0.08868316,"pnl_delta":0.08691,"balance":10000.08957,"ts":"2026-04-22T08:27:24.676858"}
+{"type":"pnl","model":"Qwen-2.5-Coder","desk":"basket","price":45113.72,"pos":0.08868316,"pnl_delta":0.08691,"balance":10000.08957,"ts":"2026-04-22T08:27:24.677116"}
+{"type":"pnl","model":"Qwen3-Coder","desk":"basket","price":45113.72,"pos":0.08868316,"pnl_delta":0.08691,"balance":10000.08957,"ts":"2026-04-22T08:27:24.677299"}
