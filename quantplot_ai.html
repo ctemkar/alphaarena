@@ -127,6 +127,31 @@
         .canary-lines { font-size:14px; color:#d9dee6; line-height:1.45; }
         .canary-reason { margin-top:8px; font-size:13px; color:#9aa3b2; }
 
+
+        /* Left panel layout */
+        .page-layout { display: grid; grid-template-columns: 220px 1fr; gap: 16px; align-items: start; }
+        .left-panel { position: sticky; top: 24px; display: flex; flex-direction: column; gap: 5px; }
+        .left-panel-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; color: #555d6b; margin: 10px 0 4px; padding-left: 2px; }
+        .panel-btn {
+            display: block; width: 100%; text-align: left;
+            border: 1px solid #2b2f36; background: #171a21; color: #d9dee6;
+            border-radius: 8px; padding: 9px 12px; font-size: 14px; cursor: pointer;
+            transition: border-color .15s, color .15s, background .15s;
+        }
+        .panel-btn:hover { border-color: #f0b90b; color: #f0b90b; }
+        .panel-btn.paused { border-color: #f84960; color: #f84960; background: #2a151b; }
+        .panel-btn.btn-danger { border-color: #f84960; color: #f84960; }
+        .panel-btn.btn-danger:hover { background: #2a151b; }
+        .panel-btn.btn-success { border-color: #02c076; color: #02c076; }
+        .panel-btn.btn-success:hover { background: #0a2018; }
+        .panel-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .left-panel .message-log { max-height: 200px; overflow-y: auto; border: 1px solid #2b2f36; border-radius: 8px; padding: 8px; background: #0f1218; font-size: 13px; }
+        .main-content { min-width: 0; }
+
+        @media (max-width: 980px) {
+            .page-layout { grid-template-columns: 1fr; }
+            .left-panel { position: static; }
+        }
         @media (max-width: 980px) {
             .desk-body { grid-template-columns: 1fr; }
         }
@@ -146,30 +171,46 @@
         &#x26A0; ORDERS BLOCKED (SIGNALS STILL RUNNING)<span id="live-blocked-reason"></span>
     </div>
 
-    <div class="control-row">
-        <button id="auto-select-btn" class="pause-btn">Disable Auto-Select</button>
-        <button id="enable-grok-btn" class="pause-btn">Enable Grok via Puter</button>
-        <button id="clear-desks-btn" class="pause-btn">Clear All Models</button>
-        <button id="away-mode-btn" class="pause-btn">Away Mode: OFF</button>
-        <button id="pause-all-btn" class="pause-btn">Pause Both Desks</button>
-        <button id="pause-btc-btn" class="pause-btn">Pause BTC Desk</button>
-        <button id="pause-basket-btn" class="pause-btn">Pause Basket Desk</button>
-        <button id="backup-stores-btn" class="pause-btn">Backup Stores</button>
-        <button id="purge-stores-btn" class="pause-btn">Backup + Clear Stores</button>
-    </div>
+    <div class="page-layout">
 
-    <div class="message-center">
-        <div class="message-header">
-            <h3>Message Center</h3>
-        </div>
-        <div class="message-actions">
-            <button id="msg-pnl-health-btn" class="pause-btn">Check PnL Health</button>
-            <button id="msg-summary-btn" class="pause-btn">Show Recent Summary</button>
-        </div>
+    <!-- ===== LEFT CONTROL PANEL ===== -->
+    <div class="left-panel">
+
+        <div class="left-panel-label">Trading</div>
+        <button id="stop-trading-btn" class="panel-btn btn-danger">&#x23F9; Stop Trading</button>
+        <button id="start-trading-btn" class="panel-btn btn-success">&#x25B6; Start Trading</button>
+        <button id="close-all-btn" class="panel-btn btn-danger">&#x2715; Close All Positions</button>
+
+        <div class="left-panel-label">Desks</div>
+        <button id="pause-all-btn" class="panel-btn">Pause Both Desks</button>
+        <button id="pause-btc-btn" class="panel-btn">Pause BTC Desk</button>
+        <button id="pause-basket-btn" class="panel-btn">Pause Basket Desk</button>
+        <button id="clear-desks-btn" class="panel-btn">Clear All Models</button>
+
+        <div class="left-panel-label">Selection</div>
+        <button id="auto-select-btn" class="panel-btn">Auto-Select: OFF</button>
+        <button id="away-mode-btn" class="panel-btn">Away Mode: OFF</button>
+
+        <div class="left-panel-label">Analytics</div>
+        <button id="msg-pnl-health-btn" class="panel-btn">Check PnL Health</button>
+        <button id="msg-summary-btn" class="panel-btn">Recent Summary</button>
+
+        <div class="left-panel-label">Integrations</div>
+        <button id="enable-grok-btn" class="panel-btn">Enable Grok via Puter</button>
+
+        <div class="left-panel-label">Stores</div>
+        <button id="backup-stores-btn" class="panel-btn">Backup Stores</button>
+        <button id="purge-stores-btn" class="panel-btn">Backup + Clear Stores</button>
+
+        <div class="left-panel-label">Messages</div>
         <div id="message-log" class="message-log">
-            <div>No messages yet.</div>
+            <div style="color:#555d6b">No messages yet.</div>
         </div>
-    </div>
+
+    </div><!-- /left-panel -->
+
+    <!-- ===== MAIN CONTENT ===== -->
+    <div class="main-content">
 
     <div class="stats">
         <div class="card"><h4>Total PnL</h4><div id="pnl-val" class="val" style="color:#02c076">+$0.00</div><div id="app-pnl-sub" class="sub">App PnL: +$0.00</div><div id="binance-pnl-sub" class="sub">Binance PnL: loading...</div></div>
@@ -229,6 +270,9 @@
         </div>
 
     </div><!-- /desks-stack -->
+
+    </div><!-- /main-content -->
+    </div><!-- /page-layout -->
 
     <div class="canary-panel" id="canary-panel" style="display:none">
         <div class="canary-head">
@@ -307,6 +351,9 @@
         const purgeStoresBtn  = document.getElementById('purge-stores-btn');
         const msgPnlHealthBtn = document.getElementById('msg-pnl-health-btn');
         const msgSummaryBtn   = document.getElementById('msg-summary-btn');
+        const stopTradingBtn  = document.getElementById('stop-trading-btn');
+        const startTradingBtn = document.getElementById('start-trading-btn');
+        const closeAllBtn     = document.getElementById('close-all-btn');
         const messageLogEl    = document.getElementById('message-log');
         const canaryPanelEl   = document.getElementById('canary-panel');
         const canaryMetaEl    = document.getElementById('canary-meta');
@@ -540,6 +587,10 @@
                 pauseBasketBtn.innerText = basketPaused ? 'Resume Basket Desk' : 'Pause Basket Desk';
                 pauseBasketBtn.classList.toggle('paused', basketPaused);
                 pauseBasketBtn.disabled = awayModeEnabled;
+            }
+            if (stopTradingBtn) {
+                stopTradingBtn.textContent = allPaused ? '\u23F9 Trading Stopped' : '\u23F9 Stop Trading';
+                stopTradingBtn.classList.toggle('paused', allPaused);
             }
         }
 
@@ -951,6 +1002,42 @@
         });
         backupStoresBtn.addEventListener('click', backupStores);
         purgeStoresBtn.addEventListener('click', purgeStores);
+
+        stopTradingBtn.addEventListener('click', async () => {
+            if (!confirm('Stop all trading and pause both desks?')) return;
+            await setPause('all', true);
+        });
+
+        startTradingBtn.addEventListener('click', async () => {
+            await setPause('all', false);
+        });
+
+        closeAllBtn.addEventListener('click', async () => {
+            if (!confirm('Close ALL open futures positions right now?')) return;
+            const origText = closeAllBtn.textContent;
+            closeAllBtn.textContent = '\u2715 Closing\u2026';
+            closeAllBtn.disabled = true;
+            try {
+                const r = await fetch('/api/flatten-futures', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                });
+                const j = await r.json();
+                closeAllBtn.textContent = j.ok ? '\u2713 Positions Closed' : '\u2715 Error: ' + (j.error || 'failed');
+                closeAllBtn.style.color = j.ok ? '#02c076' : '#f84960';
+                closeAllBtn.style.borderColor = j.ok ? '#02c076' : '#f84960';
+            } catch (e) {
+                closeAllBtn.textContent = '\u2715 Request Failed';
+            } finally {
+                setTimeout(() => {
+                    closeAllBtn.textContent = origText;
+                    closeAllBtn.disabled = false;
+                    closeAllBtn.style.color = '';
+                    closeAllBtn.style.borderColor = '';
+                }, 4000);
+            }
+        });
 
         async function refreshState() {
             try {
