@@ -688,7 +688,7 @@
                 const btc = m.desk_state ? m.desk_state.btc : null;
                 const locked = !!(btc && btc.selected);
                 const lockedLabel = locked ? 'ON BTC' : '';
-                const pnl = locked ? (btc.balance - startBalance) : 0;
+                const pnl = Number((modelStats[n] && modelStats[n].btc_pnl) || 0);
                 const view = Object.assign({}, m, { last_signal: (btc && btc.last_signal) || 'IDLE' });
                 return chipHtml(n, view, pnl, ollama, { locked, lockedLabel });
             }).join('');
@@ -698,7 +698,7 @@
                 const basket = m.desk_state ? m.desk_state.basket : null;
                 const locked = !!(basket && basket.selected);
                 const lockedLabel = locked ? 'ON BASKET' : '';
-                const pnl = locked ? (basket.balance - startBalance) : 0;
+                const pnl = Number((modelStats[n] && modelStats[n].basket_pnl) || 0);
                 const view = Object.assign({}, m, { last_signal: (basket && basket.last_signal) || 'IDLE' });
                 return chipHtml(n, view, pnl, ollama, { locked, lockedLabel });
             }).join('');

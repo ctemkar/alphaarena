@@ -225,7 +225,14 @@ try:
 except ValueError:
     MOMENTUM_OVERRIDE_THRESHOLD_PCT = 0.02
 
+HOLD_STREAK_MOMENTUM_OVERRIDE_ENABLED = os.getenv("ALPHA_HOLD_STREAK_MOMENTUM_OVERRIDE_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+try:
+    HOLD_STREAK_MOMENTUM_OVERRIDE_MIN_STREAK = int(os.getenv("ALPHA_HOLD_STREAK_MOMENTUM_OVERRIDE_MIN_STREAK", "3"))
+except ValueError:
+    HOLD_STREAK_MOMENTUM_OVERRIDE_MIN_STREAK = 3
+
 DISABLE_GROK_AUTO_SELECT = os.getenv("ALPHA_DISABLE_GROK_AUTO_SELECT", "1").strip().lower() in {"1", "true", "yes", "on"}
+BLOCK_CROSS_DESK_SELECT_ON_HOLD = os.getenv("ALPHA_BLOCK_CROSS_DESK_SELECT_ON_HOLD", "1").strip().lower() in {"1", "true", "yes", "on"}
 
 CANARY_ENABLED = os.getenv("ALPHA_CANARY_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
 CANARY_MODE = os.getenv("ALPHA_CANARY_MODE", "desk").strip().lower()  # desk | ratio
@@ -2149,6 +2156,19 @@ class ArenaState:
         if not m:
             return False
         assigned_desk = desk if desk in ("btc", "basket") else "btc"
+        other_desk = "basket" if assigned_desk == "btc" else "btc"
+        other_slot = m["desk_state"][other_desk]
+
+        if (
+            BLOCK_CROSS_DESK_SELECT_ON_HOLD
+            and other_slot.get("selected")
+            and str(other_slot.get("last_signal") or "").upper() == "HOLD"
+        ):
+            self.add_log(
+                f"{name} selection blocked on {assigned_desk.upper()}: model is HOLD on {other_desk.upper()}"
+            )
+            return False
+
         slot = m["desk_state"][assigned_desk]
         if slot["selected"]:
             return False
@@ -2517,6 +2537,7 @@ class ArenaState:
             action = 0
         live_desk = desk_key
         live_side = "HOLD"
+        hold_override_used = False
         with self.lock:
             m = self.models.get(name)
             if not m:
@@ -2524,6 +2545,18 @@ class ArenaState:
             slot = m["desk_state"][desk_key]
             if not slot["selected"]:
                 return
+
+            # Anti-stall: if a model is stuck on HOLD for multiple ticks,
+            # allow a momentum tiebreaker only when move strength is meaningful.
+            if (
+                action == 0
+                and HOLD_STREAK_MOMENTUM_OVERRIDE_ENABLED
+                and int(slot.get("hold_streak", 0)) >= max(1, HOLD_STREAK_MOMENTUM_OVERRIDE_MIN_STREAK)
+                and abs(move_pct) >= MOMENTUM_OVERRIDE_THRESHOLD_PCT
+            ):
+                action = 1 if move_pct > 0 else -1
+                hold_override_used = True
+
             side = "LONG" if action == 1 else ("SHORT" if action == -1 else "HOLD")
             hard_live_block = self.live_blocked and "Insufficient USDT" not in self.live_blocked_reason
             if self.live_trading and hard_live_block and side in {"LONG", "SHORT"}:
@@ -2553,6 +2586,10 @@ class ArenaState:
             desk = desk_key.upper()
             live_side = side
             self.add_log(f"{name} [{desk}]: {side} @ ${ref_price:,.2f} [AI]")
+            if hold_override_used and side in {"LONG", "SHORT"}:
+                self.add_log(
+                    f"{name} [{desk}]: HOLD override -> {side} (hold_streak={int(slot.get('hold_streak', 0))}, move={move_pct:+.4f}%)"
+                )
             _log_movement({
                 "type":   "signal",
                 "model":  name,
