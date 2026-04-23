@@ -536,7 +536,7 @@ class ArenaState:
         self._summary_cache = self._default_daily_summary(datetime.now().strftime("%Y-%m-%d"))
         self.tick_count = 0
         self.auto_select_enabled = AUTO_SELECT_ENABLED
-        self.auto_select_top_n = max(2, AUTO_SELECT_TOP_N)
+        self.auto_select_top_n = max(1, AUTO_SELECT_TOP_N)
         self.auto_select_interval_ticks = max(5, AUTO_SELECT_INTERVAL_TICKS)
         self.auto_select_round = 0
         self.hold_replace_streak = max(1, HOLD_REPLACE_STREAK)
@@ -2177,7 +2177,7 @@ class ArenaState:
         slot["pos"] = 0.0
         slot["entry"] = ref_price
         slot["signal_source"] = "ai"
-        slot["last_signal"] = "HOLD"
+        slot["last_signal"] = "IDLE"
         slot["trade_side"] = "FLAT"
         self.add_log(f"{name} selected to {assigned_desk.upper()} desk @ ${ref_price:,.2f} (generating first signal)")
         
@@ -2244,7 +2244,12 @@ class ArenaState:
                 slot = self.models[nm]["desk_state"][desk]
                 if not slot.get("selected"):
                     continue
-                if self.skip_selected_hold_on_signal and slot.get("last_signal") == "HOLD":
+                signals_seen = int(slot.get("hold_signals", 0)) + int(slot.get("directional_signals", 0))
+                if (
+                    self.skip_selected_hold_on_signal
+                    and slot.get("last_signal") == "HOLD"
+                    and signals_seen > 0
+                ):
                     forced_rotate.add(nm)
                     continue
                 if int(slot.get("hold_streak", 0)) >= self.hold_replace_streak:
@@ -2267,11 +2272,27 @@ class ArenaState:
             ]
             if not ranked_pool:
                 ranked_pool = [nm for nm in ranked if nm not in forced_rotate]
+            current_selected = [
+                nm for nm in auto_select_names
+                if self.models[nm]["desk_state"][desk].get("selected")
+                and nm not in forced_rotate
+                and int(self.models[nm]["desk_state"][desk].get("hold_cooldown_until_tick", 0)) <= self.tick_count
+            ]
+            winners: set[str] = set()
+            for nm in current_selected:
+                if len(winners) >= top_n:
+                    break
+                winners.add(nm)
+            if len(winners) < top_n:
+                for nm in ranked_pool:
+                    if len(winners) >= top_n:
+                        break
+                    winners.add(nm)
             desk_selections[desk] = {
                 "ranked": ranked,
                 "ranked_pool": ranked_pool,
                 "forced_rotate": forced_rotate,
-                "winners": set(ranked_pool[:top_n]),
+                "winners": winners,
             }
         
         # Second pass: enforce desk diversity - if same model on both desks, swap weaker one with best alternative
