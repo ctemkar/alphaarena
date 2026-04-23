@@ -31,3 +31,4 @@ node_modules/
 daily_summary.json
 movement_log.jsonl
 logs/*.jsonl
+logs/quantplot_watch_48h.jsonl
