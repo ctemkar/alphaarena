@@ -5,6 +5,7 @@ import os
 import queue
 import random
 import math
+import re
 import subprocess
 import shutil
 import threading
@@ -125,6 +126,7 @@ try:
 except ValueError:
     PROFIT_LOCK_COOLDOWN_TICKS = 15
 ALLOW_CROSS_SYMBOL_FALLBACK = os.getenv("ALPHA_ALLOW_CROSS_SYMBOL_FALLBACK", "1").strip().lower() in {"1", "true", "yes", "on"}
+ALLOW_BTC_DESK_FALLBACK = os.getenv("ALPHA_ALLOW_BTC_DESK_FALLBACK", "0").strip().lower() in {"1", "true", "yes", "on"}
 try:
     BINANCE_PNL_REFRESH_SECONDS = int(os.getenv("ALPHA_BINANCE_PNL_REFRESH_SECONDS", "10"))
 except ValueError:
@@ -293,9 +295,31 @@ def _signal_prompt(price: float, desk: str, price_history: list[dict] | None = N
 
 def _parse_signal_text(text: str) -> int:
     normalized = (text or "").strip().upper()
-    if "LONG" in normalized:
+    if not normalized:
+        return 0
+
+    # Fast path for strict one-word responses.
+    cleaned = normalized.strip("`\"'.,:;!?()[]{} ")
+    if cleaned == "LONG":
         return 1
-    if "SHORT" in normalized:
+    if cleaned == "SHORT":
+        return -1
+    if cleaned == "HOLD":
+        return 0
+
+    # Parse explicit signal tokens only; avoid substring bias from echoed prompts.
+    tokens = re.findall(r"\b(LONG|SHORT|HOLD)\b", normalized)
+    if not tokens:
+        return 0
+
+    has_long = "LONG" in tokens
+    has_short = "SHORT" in tokens
+    if has_long and has_short:
+        # Ambiguous output (contains both sides) should be neutral, not forced LONG.
+        return 0
+    if has_long:
+        return 1
+    if has_short:
         return -1
     return 0
 
@@ -459,6 +483,7 @@ class ArenaState:
         self.profit_lock_anchor = 0.0
         self.profit_lock_reason = ""
         self.allow_cross_symbol_fallback = ALLOW_CROSS_SYMBOL_FALLBACK
+        self.allow_btc_desk_fallback = ALLOW_BTC_DESK_FALLBACK
         self.require_live_feed = REQUIRE_LIVE_FEED
         self.strict_no_simulation = STRICT_NO_SIMULATION
         self.feed_paused = False
@@ -804,7 +829,7 @@ class ArenaState:
     def _desk_symbols(self, desk: str) -> list[str]:
         if desk == "basket":
             return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
-        if desk == "btc" and self.allow_cross_symbol_fallback:
+        if desk == "btc" and self.allow_cross_symbol_fallback and self.allow_btc_desk_fallback:
             return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
         return ["BTCUSDT"]
 
@@ -1492,6 +1517,15 @@ class ArenaState:
                 if action != 0 and abs(move_pct) < MIN_TRADE_MOVE_PCT:
                     action = 0
                     suppressed_by_move_gate = True
+                # Guardrail: do not take directional entries that directly conflict with
+                # current desk momentum direction beyond the same override threshold.
+                suppressed_by_trend_conflict = False
+                if action == 1 and move_pct <= -MOMENTUM_OVERRIDE_THRESHOLD_PCT:
+                    action = 0
+                    suppressed_by_trend_conflict = True
+                elif action == -1 and move_pct >= MOMENTUM_OVERRIDE_THRESHOLD_PCT:
+                    action = 0
+                    suppressed_by_trend_conflict = True
                 
                 live_desk = desk_key
                 live_side = "HOLD"
@@ -1510,6 +1544,11 @@ class ArenaState:
                         self.add_log(
                             f"{name} [{desk_key.upper()}]: directional signal suppressed "
                             f"(move {move_pct:+.4f}% < min {MIN_TRADE_MOVE_PCT:.4f}%)"
+                        )
+                    if suppressed_by_trend_conflict:
+                        self.add_log(
+                            f"{name} [{desk_key.upper()}]: directional signal suppressed "
+                            f"(signal conflicts with move {move_pct:+.4f}% trend)"
                         )
                     hard_live_block = self.live_blocked and "Insufficient USDT" not in self.live_blocked_reason
                     if self.live_trading and hard_live_block and side in {"LONG", "SHORT"}:
@@ -1653,7 +1692,8 @@ class ArenaState:
                 remaining -= floor
 
         if not allocations:
-            if not self.allow_cross_symbol_fallback:
+            allow_fallback_here = self.allow_cross_symbol_fallback and (desk != "btc" or self.allow_btc_desk_fallback)
+            if not allow_fallback_here:
                 with self.lock:
                     self.add_log(
                         f"{model_name} LIVE skipped: desk {desk.upper()} budget ${effective_order_usd:.2f} below desk min"
@@ -2391,11 +2431,17 @@ class ArenaState:
         action, err = _ollama_signal(ollama_tag, ref_price, desk_key, history)
         if err:
             self.add_log(f"{name} [{desk_key.upper()}]: LLM error — {err} (treated as HOLD)")
+            action = 0
+        move_pct = self._desk_recent_move_pct(desk_key)
         # Flat-market gate: suppress directional signal if market isn't moving enough
         if action != 0:
-            move_pct = self._desk_recent_move_pct(desk_key)
             if abs(move_pct) < MIN_TRADE_MOVE_PCT:
                 action = 0
+        # Guardrail: suppress entries that directly oppose current desk momentum direction.
+        if action == 1 and move_pct <= -MOMENTUM_OVERRIDE_THRESHOLD_PCT:
+            action = 0
+        elif action == -1 and move_pct >= MOMENTUM_OVERRIDE_THRESHOLD_PCT:
+            action = 0
         live_desk = desk_key
         live_side = "HOLD"
         with self.lock:
@@ -2529,6 +2575,7 @@ class ArenaState:
                     "daily_loss_limit_usd": self.daily_loss_limit_usd,
                     "min_executable_order_usd": self._global_execution_min_notional_usd(),
                     "allow_cross_symbol_fallback": self.allow_cross_symbol_fallback,
+                    "allow_btc_desk_fallback": self.allow_btc_desk_fallback,
                     "one_live_entry_per_desk_per_tick": self.one_live_entry_per_desk_per_tick,
                     "one_live_entry_global_per_tick": self.one_live_entry_global_per_tick,
                     "live_duplicate_cooldown_seconds": self.live_duplicate_cooldown_seconds,
