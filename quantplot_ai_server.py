@@ -2159,6 +2159,12 @@ class ArenaState:
         other_desk = "basket" if assigned_desk == "btc" else "btc"
         other_slot = m["desk_state"][other_desk]
 
+        if other_slot.get("selected"):
+            self.add_log(
+                f"{name} selection blocked on {assigned_desk.upper()}: model already selected on {other_desk.upper()}"
+            )
+            return False
+
         if (
             BLOCK_CROSS_DESK_SELECT_ON_HOLD
             and other_slot.get("selected")
@@ -2297,7 +2303,7 @@ class ArenaState:
         
         # Second pass: enforce desk diversity - if same model on both desks, swap weaker one with best alternative
         overlap = desk_selections["btc"]["winners"] & desk_selections["basket"]["winners"]
-        if overlap and len(overlap) > 1:  # Only fix if there's more than just one overlapping (acceptable)
+        if overlap:
             for desk in ("btc", "basket"):
                 other_desk = "basket" if desk == "btc" else "btc"
                 other_winners = desk_selections[other_desk]["winners"]

@@ -374,7 +374,18 @@
 
 
         function pnlClass(v) { return v > 0 ? 'chip-pnl-pos' : v < 0 ? 'chip-pnl-neg' : 'chip-pnl-flat'; }
-        function formatPnl(v) { const n = Number(v.toFixed(2)); return (n >= 0 ? '+' : '') + '$' + n.toLocaleString(); }
+        function formatPnl(v) {
+            const raw = Number(v || 0);
+            const abs = Math.abs(raw);
+            let digits = 2;
+            if (abs > 0 && abs < 0.01) digits = 6;
+            else if (abs < 1) digits = 4;
+            const n = Number(raw.toFixed(digits));
+            return (n >= 0 ? '+' : '') + '$' + n.toLocaleString(undefined, {
+                minimumFractionDigits: digits,
+                maximumFractionDigits: digits,
+            });
+        }
         function formatPct(v) { return Number(v || 0).toFixed(2) + '%'; }
         function countSelected(models, desk) {
             return Object.values(models).filter(m => m.desk_state && m.desk_state[desk] && m.desk_state[desk].selected).length;
@@ -485,9 +496,9 @@
                     + '<td style="color:#848e9c">' + (i + 1) + '</td>'
                     + '<td><span style="color:' + m.color + ';font-weight:700">' + name + '</span>'
                     +    (isAi ? ' <span style="font-size:14px;background:#a7f432;color:#0b0e11;border-radius:3px;padding:1px 5px;font-weight:700">AI</span>' : '') + '</td>'
-                    + '<td class="' + pnlCls(totalPnl) + '">' + (totalPnl >= 0 ? '+' : '') + '$' + totalPnl.toFixed(2) + '</td>'
-                    + '<td class="' + pnlCls(btcPnl) + '">' + (btcPnl >= 0 ? '+' : '') + '$' + btcPnl.toFixed(2) + '</td>'
-                    + '<td class="' + pnlCls(basketPnl) + '">' + (basketPnl >= 0 ? '+' : '') + '$' + basketPnl.toFixed(2) + '</td>'
+                    + '<td class="' + pnlCls(totalPnl) + '">' + formatPnl(totalPnl) + '</td>'
+                    + '<td class="' + pnlCls(btcPnl) + '">' + formatPnl(btcPnl) + '</td>'
+                    + '<td class="' + pnlCls(basketPnl) + '">' + formatPnl(basketPnl) + '</td>'
                     + '<td>' + sigBadge(m.btc_signal) + '</td>'
                     + '<td>' + sigBadge(m.basket_signal) + '</td>'
                     + '<td style="text-align:center">' + (activeDots || '<span style="color:#444">—</span>') + '</td>'
