@@ -433,14 +433,18 @@
                 return;
             }
             const ex = Number(binancePnl.equity_delta_usd || 0);
+            const scoped = Number(binancePnl.tracked_delta_usd || 0);
             const un = Number(binancePnl.unrealized_usd || 0);
+            const trackedUn = Number(binancePnl.tracked_unrealized_usd || 0);
             const wallet = Number(binancePnl.wallet_balance_usd || 0);
             const margin = Number(binancePnl.margin_balance_usd || 0);
             const updated = binancePnl.updated_at || '--:--:--';
             const binAge = clockAgeSeconds(updated);
             const binStale = binAge !== null && binAge > 15 ? ' (stale)' : '';
             binancePnlSubEl.innerText =
-                'Binance PnL Delta: ' + formatPnl(ex)
+                'Binance Scoped Delta (BTC/ETH/SOL/BNB): ' + formatPnl(scoped)
+                + ' | Scoped Unrealized: ' + formatPnl(trackedUn)
+                + ' | Account Delta: ' + formatPnl(ex)
                 + ' | Unrealized: ' + formatPnl(un)
                 + ' | Wallet: ' + formatPnl(wallet)
                 + ' | Margin: ' + formatPnl(margin)
@@ -675,10 +679,7 @@
             const appLedgerPnl = (typeof s.app_total_pnl_usd === 'number')
                 ? Number(s.app_total_pnl_usd)
                 : (btcPnl + basketPnl);
-            const strictLiveMode = !!(s.status && s.status.no_simulation && s.status.mode === 'LIVE');
-            const binanceEquityDelta = Number(((s.binance_pnl || {}).equity_delta_usd) || 0);
-            const hasBinancePnl = !!(s.binance_pnl && s.binance_pnl.available);
-            const totalPnl = (strictLiveMode && hasBinancePnl) ? binanceEquityDelta : appLedgerPnl;
+            const totalPnl = appLedgerPnl;
 
             // Available pools — show ALL models in BOTH desks.
             // Lock only if selected in the SAME desk (desks are independent).

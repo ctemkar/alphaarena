@@ -131,6 +131,10 @@ try:
     BINANCE_PNL_REFRESH_SECONDS = int(os.getenv("ALPHA_BINANCE_PNL_REFRESH_SECONDS", "10"))
 except ValueError:
     BINANCE_PNL_REFRESH_SECONDS = 10
+try:
+    MIN_FREE_USDT_BUFFER = float(os.getenv("ALPHA_MIN_FREE_USDT_BUFFER", "2.0"))
+except ValueError:
+    MIN_FREE_USDT_BUFFER = 2.0
 
 try:
     START_BALANCE = float(os.getenv("ALPHA_START_BALANCE_USD", str(START_BALANCE)))
@@ -506,10 +510,13 @@ class ArenaState:
         self.binance_pnl_refresh_seconds = max(5, BINANCE_PNL_REFRESH_SECONDS)
         self.binance_pnl_last_refresh = 0.0
         self.binance_margin_baseline: float | None = None
+        self.binance_tracked_unrealized_baseline: float | None = None
         self.binance_pnl = {
             "available": False,
             "equity_delta_usd": 0.0,
             "unrealized_usd": 0.0,
+            "tracked_delta_usd": 0.0,
+            "tracked_unrealized_usd": 0.0,
             "wallet_balance_usd": 0.0,
             "margin_balance_usd": 0.0,
             "updated_at": "",
@@ -993,6 +1000,8 @@ class ArenaState:
                 "available": False,
                 "equity_delta_usd": 0.0,
                 "unrealized_usd": 0.0,
+                "tracked_delta_usd": 0.0,
+                "tracked_unrealized_usd": 0.0,
                 "wallet_balance_usd": 0.0,
                 "margin_balance_usd": 0.0,
                 "updated_at": now_ts(),
@@ -1005,13 +1014,34 @@ class ArenaState:
             margin_balance = float(account.get("totalMarginBalance", "0") or 0.0)
             wallet_balance = float(account.get("totalWalletBalance", "0") or 0.0)
             unrealized = float(account.get("totalUnrealizedProfit", "0") or 0.0)
+            tracked_symbols = {"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"}
+            tracked_unrealized = 0.0
+            for p in account.get("positions", []) or []:
+                symbol = str(p.get("symbol") or "")
+                if symbol not in tracked_symbols:
+                    continue
+                try:
+                    pos_amt = float(p.get("positionAmt", "0") or 0.0)
+                except Exception:
+                    pos_amt = 0.0
+                if abs(pos_amt) <= 1e-12:
+                    continue
+                try:
+                    tracked_unrealized += float(p.get("unrealizedProfit", "0") or 0.0)
+                except Exception:
+                    continue
             if self.binance_margin_baseline is None:
                 self.binance_margin_baseline = margin_balance
+            if self.binance_tracked_unrealized_baseline is None:
+                self.binance_tracked_unrealized_baseline = tracked_unrealized
             equity_delta = margin_balance - float(self.binance_margin_baseline)
+            tracked_delta = tracked_unrealized - float(self.binance_tracked_unrealized_baseline)
             self.binance_pnl = {
                 "available": True,
                 "equity_delta_usd": equity_delta,
                 "unrealized_usd": unrealized,
+                "tracked_delta_usd": tracked_delta,
+                "tracked_unrealized_usd": tracked_unrealized,
                 "wallet_balance_usd": wallet_balance,
                 "margin_balance_usd": margin_balance,
                 "updated_at": now_ts(),
@@ -1022,6 +1052,8 @@ class ArenaState:
                 "available": False,
                 "equity_delta_usd": 0.0,
                 "unrealized_usd": 0.0,
+                "tracked_delta_usd": 0.0,
+                "tracked_unrealized_usd": 0.0,
                 "wallet_balance_usd": 0.0,
                 "margin_balance_usd": 0.0,
                 "updated_at": now_ts(),
@@ -1761,11 +1793,13 @@ class ArenaState:
             return False
 
         required_usdt = sum(allocations.values())
-        if free_usdt + 1e-9 < required_usdt:
+        required_with_buffer = required_usdt + max(0.0, MIN_FREE_USDT_BUFFER)
+        if free_usdt + 1e-9 < required_with_buffer:
             with self.lock:
                 self.add_log(
-                    f"LIVE FUNDS WARNING: free ${free_usdt:.2f} below est. notional ${required_usdt:.2f}; sending orders (exchange will enforce margin)"
+                    f"LIVE SKIPPED: free ${free_usdt:.2f} below required ${required_usdt:.2f} + buffer ${max(0.0, MIN_FREE_USDT_BUFFER):.2f}"
                 )
+            return False
 
         for symbol, order_usd in allocations.items():
             self.live_order_queue.put((model_name, desk, symbol, side_label, order_usd, signal_arm, signal_provider))
@@ -1877,11 +1911,13 @@ class ArenaState:
                 return self._execute_live_signal_legacy(model_name, desk, side_label, signal_arm, signal_provider)
             return False
 
-        if free_usdt + 1e-9 < plan.required_usdt:
+        required_with_buffer = plan.required_usdt + max(0.0, MIN_FREE_USDT_BUFFER)
+        if free_usdt + 1e-9 < required_with_buffer:
             with self.lock:
                 self.add_log(
-                    f"CORE FUNDS WARNING: free ${free_usdt:.2f} below est. notional ${plan.required_usdt:.2f}; sending orders"
+                    f"CORE SKIPPED: free ${free_usdt:.2f} below required ${plan.required_usdt:.2f} + buffer ${max(0.0, MIN_FREE_USDT_BUFFER):.2f}"
                 )
+            return False
 
         for symbol, order_usd in plan.allocations.items():
             self.live_order_queue.put((model_name, desk, symbol, side_label, order_usd, signal_arm, signal_provider))
@@ -2308,6 +2344,41 @@ class ArenaState:
             self.add_log(f"AUTO-SELECT {state}")
             return True
 
+    def set_order_sizing(self, order_usd: float, max_order_usd: float | None = None) -> tuple[bool, str]:
+        with self.lock:
+            try:
+                order_val = float(order_usd)
+            except Exception:
+                return False, "order_usd must be numeric"
+
+            if max_order_usd is None:
+                max_val = self.max_order_usd
+            else:
+                try:
+                    max_val = float(max_order_usd)
+                except Exception:
+                    return False, "max_order_usd must be numeric"
+
+            max_val = max(5.0, min(max_val, HARD_MAX_ORDER_USD))
+            order_val = max(5.0, min(order_val, max_val, HARD_MAX_ORDER_USD))
+
+            changed = False
+            if abs(self.max_order_usd - max_val) > 1e-9:
+                self.max_order_usd = max_val
+                changed = True
+            if abs(self.live_order_usd - order_val) > 1e-9:
+                self.live_order_usd = order_val
+                changed = True
+
+            if changed:
+                self.add_log(
+                    f"ORDER SIZE UPDATED: order ${self.live_order_usd:.2f}, max ${self.max_order_usd:.2f} "
+                    f"(hard cap ${HARD_MAX_ORDER_USD:.2f})"
+                )
+                return True, "order sizing updated"
+
+            return False, "order sizing unchanged"
+
     def set_away_mode(self, enabled: bool) -> bool:
         with self.lock:
             enabled = bool(enabled)
@@ -2686,6 +2757,7 @@ class ArenaHandler(SimpleHTTPRequestHandler):
             "/api/select",
             "/api/deselect",
             "/api/pause",
+            "/api/order-size",
             "/api/flatten-futures",
             "/api/core/mode",
             "/api/core/fallback",
@@ -2845,6 +2917,23 @@ class ArenaHandler(SimpleHTTPRequestHandler):
                 self._json(409, {"ok": False, "error": "No state change"})
                 return
             self._json(200, {"ok": True})
+            return
+
+        if route_path == "/api/order-size":
+            if "order_usd" not in data:
+                self._json(400, {"ok": False, "error": "order_usd is required"})
+                return
+            order_usd = data.get("order_usd")
+            max_order_usd = data.get("max_order_usd") if "max_order_usd" in data else None
+            changed, msg = self.state.set_order_sizing(order_usd, max_order_usd)
+            status = self.state.snapshot().get("status", {})
+            self._json(200 if changed else 409, {
+                "ok": changed,
+                "changed": changed,
+                "message": msg,
+                "order_usd": status.get("order_usd"),
+                "max_order_usd": status.get("max_order_usd"),
+            })
             return
 
         if route_path == "/api/auto-select":
