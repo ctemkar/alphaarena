@@ -161,6 +161,7 @@ try:
     HOLD_COOLDOWN_TICKS = int(os.getenv("ALPHA_HOLD_COOLDOWN_TICKS", "12"))
 except ValueError:
     HOLD_COOLDOWN_TICKS = 12
+HOLD_CLOSES_POSITION = os.getenv("ALPHA_HOLD_CLOSES_POSITION", "0").strip().lower() in {"1", "true", "yes", "on"}
 SKIP_SELECTED_HOLD_ON_SIGNAL = os.getenv("ALPHA_SKIP_SELECTED_HOLD_ON_SIGNAL", "0").strip().lower() in {"1", "true", "yes", "on"}
 try:
     HOLD_SCORE_PENALTY = float(os.getenv("ALPHA_HOLD_SCORE_PENALTY", "8.0"))
@@ -2598,9 +2599,12 @@ class ArenaState:
                         self.tick_count + self.hold_cooldown_ticks,
                     )
                 slot["hold_signals"] = int(slot.get("hold_signals", 0)) + 1
-                # HOLD closes the open trade and flattens position.
-                self._close_trade_if_open(name, desk_key, slot, "hold_signal", ref_price)
-                slot["pos"] = 0.0
+                # By default, do not force-close on HOLD in live mode.
+                # This avoids churn losses in ranging markets; directional
+                # flips and risk guardrails still close positions as needed.
+                if HOLD_CLOSES_POSITION:
+                    self._close_trade_if_open(name, desk_key, slot, "hold_signal", ref_price)
+                    slot["pos"] = 0.0
                 slot["mark_price"] = ref_price
             else:
                 slot["hold_streak"] = 0
