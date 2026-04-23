@@ -27,7 +27,7 @@ START_BALANCE = 10_000.0
 MAX_LOGS = 60
 MAX_MESSAGE_CENTER = 30
 TICK_SECONDS = 3.0
-HARD_MAX_ORDER_USD = 10.0
+HARD_MAX_ORDER_USD = 150.0
 OLLAMA_URL = "http://127.0.0.1:11434"
 try:
     OLLAMA_REQUEST_TIMEOUT_SECONDS = float(os.getenv("ALPHA_OLLAMA_TIMEOUT_SECONDS", "60"))
@@ -105,13 +105,13 @@ except ValueError:
     ANALYTICS_SLIPPAGE_BPS = 5.0
 
 try:
-    LIVE_ORDER_USD = float(os.getenv("ALPHA_LIVE_ORDER_USD", "10"))
+    LIVE_ORDER_USD = float(os.getenv("ALPHA_LIVE_ORDER_USD", "80"))
 except ValueError:
-    LIVE_ORDER_USD = 10.0
+    LIVE_ORDER_USD = 80.0
 try:
-    MAX_ORDER_USD = float(os.getenv("ALPHA_MAX_ORDER_USD", "10"))
+    MAX_ORDER_USD = float(os.getenv("ALPHA_MAX_ORDER_USD", "120"))
 except ValueError:
-    MAX_ORDER_USD = 10.0
+    MAX_ORDER_USD = 120.0
 try:
     DAILY_LOSS_LIMIT_USD = float(os.getenv("ALPHA_DAILY_LOSS_LIMIT_USD", "100"))
 except ValueError:
@@ -1818,7 +1818,9 @@ class ArenaState:
                 one_live_entry_global_per_tick=self.one_live_entry_global_per_tick,
                 desk_already_routed_this_tick=(self.last_live_entry_tick_by_desk.get(desk, -1) == self.tick_count),
                 global_already_routed_this_tick=(self.last_live_entry_tick_global == self.tick_count),
-                allow_cross_symbol_fallback=self.allow_cross_symbol_fallback,
+                allow_cross_symbol_fallback=(
+                    self.allow_cross_symbol_fallback and (desk != "btc" or self.allow_btc_desk_fallback)
+                ),
                 desk_symbols=self._desk_symbols(desk),
                 universe_symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"],
                 symbol_prices={
