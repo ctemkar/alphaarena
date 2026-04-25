@@ -70,11 +70,6 @@
         .empty { color: #848e9c; font-size: 17px; padding: 4px 0; }
         .trade-log { max-height: 120px; overflow-y: auto; font-size: 16px; color: #848e9c; border-top: 1px solid #2b2f36; padding-top: 6px; margin-top: 4px; }
         .trade-log div { padding: 2px 0; }
-        
-        .coin-log { max-height: 120px; overflow-y: auto; font-size: 14px; color: #b7bdc6; border-top: 1px solid #2b2f36; padding-top: 8px; margin-top: 8px; }
-        .coin-log-title { color: #9aa3b2; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; font-weight: 600; }
-        .coin-log-empty { color: #6b757f; font-size: 13px; padding: 4px 0; font-style: italic; }
-        .coin-line { padding: 2px 0; font-family: monospace; font-size: 12px; }
 
         /* LIVE BLOCKED banner */
         #live-blocked-banner { display:none; background:#f8496022; border:1px solid #f84960; border-radius:8px; padding:10px 16px; margin-bottom:14px; color:#f84960; font-size:17px; font-weight:500; }
@@ -246,7 +241,6 @@
                 <div>
                     <div class="chart-box"><canvas id="btcChart"></canvas></div>
                     <div class="trade-log" id="log-btc"></div>
-                    <div class="coin-log" id="coins-btc"></div>
                 </div>
             </div>
         </div>
@@ -271,7 +265,6 @@
                 <div>
                     <div class="chart-box"><canvas id="basketChart"></canvas></div>
                     <div class="trade-log" id="log-basket"></div>
-                    <div class="coin-log" id="coins-basket"></div>
                 </div>
             </div>
         </div>
@@ -343,8 +336,6 @@
         const emptyBasketEl   = document.getElementById('empty-basket');
         const logBtcEl        = document.getElementById('log-btc');
         const logBasketEl     = document.getElementById('log-basket');
-        const coinsBtcEl      = document.getElementById('coins-btc');
-        const coinsBasketEl   = document.getElementById('coins-basket');
         const modeLabelEl     = document.getElementById('mode-label');
         const liveBlockedBanner = document.getElementById('live-blocked-banner');
         const liveBlockedReason = document.getElementById('live-blocked-reason');
@@ -375,56 +366,6 @@
         let lastServerStartedAt = null;
         let btcPrevPrice = null;
         let basketPrevPrice = null;
-        let deskPnlScope = 'selected';
-
-        function deskPnlFromStats(stats, desk, selectedOnly) {
-            const keyPnl = desk === 'btc' ? 'btc_pnl' : 'basket_pnl';
-            const keySelected = desk === 'btc' ? 'btc_selected' : 'basket_selected';
-            return Object.values(stats || {}).reduce((acc, m) => {
-                if (selectedOnly && !m[keySelected]) return acc;
-                return acc + Number(m[keyPnl] || 0);
-            }, 0);
-        }
-
-        function renderDeskCoinLog(liveLedger, desk, targetEl) {
-            if (!targetEl) return;
-            const rows = [];
-            for (const [key, value] of Object.entries(liveLedger || {})) {
-                const parts = key.split(',');
-                if (parts.length !== 3) continue;
-                const model = parts[0];
-                const entryDesk = parts[1];
-                const symbol = parts[2];
-                if (entryDesk !== desk) continue;
-                const openQty = Number((value && value.open_qty) || 0);
-                const avgEntry = Number((value && value.avg_entry) || 0);
-                const trades = Number((value && value.trades) || 0);
-                if (Math.abs(openQty) < 1e-12 && trades <= 0) continue;
-                const side = openQty > 0 ? 'LONG' : openQty < 0 ? 'SHORT' : 'FLAT';
-                rows.push({
-                    model, symbol, side,
-                    qty: Math.abs(openQty),
-                    entry: avgEntry,
-                    notional: Math.abs(openQty * avgEntry),
-                });
-            }
-            rows.sort((a, b) => b.notional - a.notional);
-            if (!rows.length) {
-                targetEl.innerHTML = '<div class="coin-log-title">Bought/Sold Coins</div><div class="coin-log-empty">No fills for this desk yet</div>';
-                return;
-            }
-            targetEl.innerHTML = '<div class="coin-log-title">Bought/Sold Coins</div>' + rows.map((row) => {
-                const sideColor = row.side === 'LONG' ? '#02c076' : row.side === 'SHORT' ? '#f84960' : '#848e9c';
-                return '<div class="coin-line">'
-                    + '<span style="color:#eaecef">' + row.model + '</span>'
-                    + ' | <span style="color:#9aa3b2">' + row.symbol + '</span>'
-                    + ' | <span style="color:' + sideColor + ';font-weight:600">' + row.side + '</span>'
-                    + ' | qty ' + row.qty.toFixed(6)
-                    + ' @ $' + row.entry.toFixed(2)
-                    + ' = $' + row.notional.toFixed(2)
-                    + '</div>';
-            }).join('');
-        }
 
         function makeDeskChart(canvasId, label, color) {
             return new Chart(document.getElementById(canvasId).getContext('2d'), {
@@ -787,9 +728,8 @@
 
             // Desk prices & PnL — use model_stats from server (real fill ledger in live mode)
             const modelStats = s.model_stats || {};
-            const selectedOnlyScope = deskPnlScope === 'selected';
-            let btcPnl = deskPnlFromStats(modelStats, 'btc', selectedOnlyScope);
-            let basketPnl = deskPnlFromStats(modelStats, 'basket', selectedOnlyScope);
+            let btcPnl = Object.values(modelStats).reduce((acc, m) => acc + Number(m.btc_pnl || 0), 0);
+            let basketPnl = Object.values(modelStats).reduce((acc, m) => acc + Number(m.basket_pnl || 0), 0);
             const strictLive = !!(s.status && s.status.no_simulation && s.status.mode === 'LIVE');
             if (basketPriceDeskEl) basketPriceDeskEl.innerText = '$' + Number(s.prices.basket).toLocaleString(undefined, { maximumFractionDigits: 2 });
             let btcDeskDisplayPnl = btcPnl;
@@ -859,8 +799,6 @@
             const basketLogs = s.logs.filter(l => l.includes('[BASKET]') || !l.includes('[BTC]'));
             logBtcEl.innerHTML    = btcLogs.map(msg    => '<div>' + msg + '</div>').join('');
             logBasketEl.innerHTML = basketLogs.map(msg => '<div>' + msg + '</div>').join('');
-            renderDeskCoinLog(s.live_ledger || {}, 'btc', coinsBtcEl);
-            renderDeskCoinLog(s.live_ledger || {}, 'basket', coinsBasketEl);
 
             btcPrevPrice = null;
             basketPrevPrice = null;

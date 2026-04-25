@@ -1802,12 +1802,42 @@ class ArenaState:
 
         required_usdt = sum(allocations.values())
         required_with_buffer = required_usdt + max(0.0, MIN_FREE_USDT_BUFFER)
+        
+        # Auto-size down if free balance is tight, instead of hard-skipping.
+        # This allows trading to continue at reduced size during temporary balance constraints.
         if free_usdt + 1e-9 < required_with_buffer:
+            available_for_orders = max(0.0, free_usdt - max(0.0, MIN_FREE_USDT_BUFFER))
+            if available_for_orders < 1e-9:
+                # Completely unable to trade
+                with self.lock:
+                    self.add_log(
+                        f"LIVE SKIPPED: free ${free_usdt:.2f} below buffer ${max(0.0, MIN_FREE_USDT_BUFFER):.2f}"
+                    )
+                return False
+            
+            # Scale all allocations down proportionally to fit available balance
+            scale_factor = available_for_orders / max(required_usdt, 1e-9)
+            scaled_allocations: dict[str, float] = {}
+            for symbol, order_usd in allocations.items():
+                scaled_usd = order_usd * scale_factor
+                if scaled_usd >= 1.0:  # Only keep non-trivial allocations
+                    scaled_allocations[symbol] = scaled_usd
+            
+            if not scaled_allocations:
+                with self.lock:
+                    self.add_log(
+                        f"LIVE SKIPPED: free ${free_usdt:.2f} vs required ${required_usdt:.2f}; "
+                        f"scaled size dropped below minimum notional"
+                    )
+                return False
+            
             with self.lock:
                 self.add_log(
-                    f"LIVE SKIPPED: free ${free_usdt:.2f} below required ${required_usdt:.2f} + buffer ${max(0.0, MIN_FREE_USDT_BUFFER):.2f}"
+                    f"{model_name} LIVE auto-sized down: free ${free_usdt:.2f} < required ${required_with_buffer:.2f}; "
+                    f"scaling ${required_usdt:.2f} -> ${sum(scaled_allocations.values()):.2f}"
                 )
-            return False
+            allocations = scaled_allocations
+            required_usdt = sum(allocations.values())
 
         for symbol, order_usd in allocations.items():
             self.live_order_queue.put((model_name, desk, symbol, side_label, order_usd, signal_arm, signal_provider))
