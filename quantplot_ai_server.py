@@ -132,6 +132,10 @@ try:
 except ValueError:
     BINANCE_PNL_REFRESH_SECONDS = 10
 try:
+    BINANCE_INCOME_LOOKBACK_HOURS = float(os.getenv("ALPHA_BINANCE_INCOME_LOOKBACK_HOURS", "2"))
+except ValueError:
+    BINANCE_INCOME_LOOKBACK_HOURS = 2.0
+try:
     MIN_FREE_USDT_BUFFER = float(os.getenv("ALPHA_MIN_FREE_USDT_BUFFER", "2.0"))
 except ValueError:
     MIN_FREE_USDT_BUFFER = 2.0
@@ -530,6 +534,12 @@ class ArenaState:
             "unrealized_usd": 0.0,
             "tracked_delta_usd": 0.0,
             "tracked_unrealized_usd": 0.0,
+            "realized_pnl_usd": 0.0,
+            "commission_usd": 0.0,
+            "funding_fee_usd": 0.0,
+            "income_other_usd": 0.0,
+            "net_income_usd": 0.0,
+            "income_window_hours": 0.0,
             "wallet_balance_usd": 0.0,
             "margin_balance_usd": 0.0,
             "updated_at": "",
@@ -1018,6 +1028,12 @@ class ArenaState:
                 "unrealized_usd": 0.0,
                 "tracked_delta_usd": 0.0,
                 "tracked_unrealized_usd": 0.0,
+                "realized_pnl_usd": 0.0,
+                "commission_usd": 0.0,
+                "funding_fee_usd": 0.0,
+                "income_other_usd": 0.0,
+                "net_income_usd": 0.0,
+                "income_window_hours": 0.0,
                 "wallet_balance_usd": 0.0,
                 "margin_balance_usd": 0.0,
                 "updated_at": now_ts(),
@@ -1030,6 +1046,37 @@ class ArenaState:
             margin_balance = float(account.get("totalMarginBalance", "0") or 0.0)
             wallet_balance = float(account.get("totalWalletBalance", "0") or 0.0)
             unrealized = float(account.get("totalUnrealizedProfit", "0") or 0.0)
+            lookback_hours = max(0.25, float(BINANCE_INCOME_LOOKBACK_HOURS))
+            end_ms = int(time.time() * 1000)
+            start_ms = max(0, end_ms - int(lookback_hours * 3600 * 1000))
+            income_rows = self._binance_signed_get(
+                "/fapi/v1/income",
+                {
+                    "startTime": start_ms,
+                    "endTime": end_ms,
+                    "limit": 1000,
+                },
+                futures=True,
+            )
+            realized_pnl = 0.0
+            commission = 0.0
+            funding_fee = 0.0
+            income_other = 0.0
+            for rec in income_rows or []:
+                income_type = str(rec.get("incomeType") or "")
+                try:
+                    income_val = float(rec.get("income", "0") or 0.0)
+                except Exception:
+                    continue
+                if income_type == "REALIZED_PNL":
+                    realized_pnl += income_val
+                elif income_type == "COMMISSION":
+                    commission += income_val
+                elif income_type == "FUNDING_FEE":
+                    funding_fee += income_val
+                else:
+                    income_other += income_val
+            net_income = realized_pnl + commission + funding_fee + income_other
             tracked_symbols = {"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"}
             tracked_unrealized = 0.0
             for p in account.get("positions", []) or []:
@@ -1058,6 +1105,12 @@ class ArenaState:
                 "unrealized_usd": unrealized,
                 "tracked_delta_usd": tracked_delta,
                 "tracked_unrealized_usd": tracked_unrealized,
+                "realized_pnl_usd": realized_pnl,
+                "commission_usd": commission,
+                "funding_fee_usd": funding_fee,
+                "income_other_usd": income_other,
+                "net_income_usd": net_income,
+                "income_window_hours": lookback_hours,
                 "wallet_balance_usd": wallet_balance,
                 "margin_balance_usd": margin_balance,
                 "updated_at": now_ts(),
@@ -1070,6 +1123,12 @@ class ArenaState:
                 "unrealized_usd": 0.0,
                 "tracked_delta_usd": 0.0,
                 "tracked_unrealized_usd": 0.0,
+                "realized_pnl_usd": 0.0,
+                "commission_usd": 0.0,
+                "funding_fee_usd": 0.0,
+                "income_other_usd": 0.0,
+                "net_income_usd": 0.0,
+                "income_window_hours": 0.0,
                 "wallet_balance_usd": 0.0,
                 "margin_balance_usd": 0.0,
                 "updated_at": now_ts(),

@@ -580,6 +580,12 @@
             const scoped = Number(binancePnl.tracked_delta_usd || 0);
             const un = Number(binancePnl.unrealized_usd || 0);
             const trackedUn = Number(binancePnl.tracked_unrealized_usd || 0);
+            const realized = Number(binancePnl.realized_pnl_usd || 0);
+            const fees = Number(binancePnl.commission_usd || 0);
+            const funding = Number(binancePnl.funding_fee_usd || 0);
+            const otherIncome = Number(binancePnl.income_other_usd || 0);
+            const netIncome = Number(binancePnl.net_income_usd || 0);
+            const incomeWindowHours = Number(binancePnl.income_window_hours || 0);
             const wallet = Number(binancePnl.wallet_balance_usd || 0);
             const margin = Number(binancePnl.margin_balance_usd || 0);
             const updated = binancePnl.updated_at || '--:--:--';
@@ -588,6 +594,11 @@
             binancePnlSubEl.innerText =
                 'Binance Scoped Delta (BTC/ETH/SOL/BNB): ' + formatPnl(scoped)
                 + ' | Scoped Unrealized: ' + formatPnl(trackedUn)
+                + ' | Realized(' + incomeWindowHours.toFixed(2) + 'h): ' + formatPnl(realized)
+                + ' | Fees(' + incomeWindowHours.toFixed(2) + 'h): ' + formatPnl(fees)
+                + ' | Funding(' + incomeWindowHours.toFixed(2) + 'h): ' + formatPnl(funding)
+                + ' | Other(' + incomeWindowHours.toFixed(2) + 'h): ' + formatPnl(otherIncome)
+                + ' | Net Realized(' + incomeWindowHours.toFixed(2) + 'h): ' + formatPnl(netIncome)
                 + ' | Account Delta: ' + formatPnl(ex)
                 + ' | Unrealized: ' + formatPnl(un)
                 + ' | Wallet: ' + formatPnl(wallet)
