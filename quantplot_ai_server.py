@@ -27,7 +27,7 @@ START_BALANCE = 10_000.0
 MAX_LOGS = 60
 MAX_MESSAGE_CENTER = 30
 TICK_SECONDS = 3.0
-HARD_MAX_ORDER_USD = 150.0
+HARD_MAX_ORDER_USD = 1200.0
 OLLAMA_URL = "http://127.0.0.1:11434"
 try:
     OLLAMA_REQUEST_TIMEOUT_SECONDS = float(os.getenv("ALPHA_OLLAMA_TIMEOUT_SECONDS", "60"))
@@ -135,6 +135,11 @@ try:
     MIN_FREE_USDT_BUFFER = float(os.getenv("ALPHA_MIN_FREE_USDT_BUFFER", "2.0"))
 except ValueError:
     MIN_FREE_USDT_BUFFER = 2.0
+try:
+    # Treat free USDT as margin, not full notional, when preflighting futures orders.
+    EFFECTIVE_FUTURES_LEVERAGE = float(os.getenv("ALPHA_EFFECTIVE_FUTURES_LEVERAGE", "20"))
+except ValueError:
+    EFFECTIVE_FUTURES_LEVERAGE = 20.0
 
 try:
     START_BALANCE = float(os.getenv("ALPHA_START_BALANCE_USD", str(START_BALANCE)))
@@ -843,6 +848,9 @@ class ArenaState:
 
     def _desk_symbols(self, desk: str) -> list[str]:
         if desk == "basket":
+            # Keep BTCUSDT dedicated to BTC desk when BTC models are actively selected.
+            if self.selected_count("btc") > 0 and not self.paused_desks.get("btc", False):
+                return ["ETHUSDT", "SOLUSDT", "BNBUSDT"]
             return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
         if desk == "btc" and self.allow_cross_symbol_fallback and self.allow_btc_desk_fallback:
             return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
@@ -1801,12 +1809,14 @@ class ArenaState:
             return False
 
         required_usdt = sum(allocations.values())
-        required_with_buffer = required_usdt + max(0.0, MIN_FREE_USDT_BUFFER)
+        eff_lev = max(1.0, float(EFFECTIVE_FUTURES_LEVERAGE))
+        required_margin = required_usdt / eff_lev
+        required_with_buffer = required_margin + max(0.0, MIN_FREE_USDT_BUFFER)
         
         # Auto-size down if free balance is tight, instead of hard-skipping.
         # This allows trading to continue at reduced size during temporary balance constraints.
         if free_usdt + 1e-9 < required_with_buffer:
-            available_for_orders = max(0.0, free_usdt - max(0.0, MIN_FREE_USDT_BUFFER))
+            available_for_orders = max(0.0, free_usdt - max(0.0, MIN_FREE_USDT_BUFFER)) * eff_lev
             if available_for_orders < 1e-9:
                 # Completely unable to trade
                 with self.lock:
@@ -1949,7 +1959,8 @@ class ArenaState:
                 return self._execute_live_signal_legacy(model_name, desk, side_label, signal_arm, signal_provider)
             return False
 
-        required_with_buffer = plan.required_usdt + max(0.0, MIN_FREE_USDT_BUFFER)
+        eff_lev = max(1.0, float(EFFECTIVE_FUTURES_LEVERAGE))
+        required_with_buffer = (plan.required_usdt / eff_lev) + max(0.0, MIN_FREE_USDT_BUFFER)
         if free_usdt + 1e-9 < required_with_buffer:
             with self.lock:
                 self.add_log(
@@ -2332,24 +2343,21 @@ class ArenaState:
                 "winners": winners,
             }
         
-        # Second pass: enforce desk diversity - if same model on both desks, swap weaker one with best alternative
+        # Second pass: enforce desk diversity by rotating overlap on BASKET only,
+        # preserving BTC desk winners for BTC execution quality.
         overlap = desk_selections["btc"]["winners"] & desk_selections["basket"]["winners"]
         if overlap:
-            for desk in ("btc", "basket"):
-                other_desk = "basket" if desk == "btc" else "btc"
-                other_winners = desk_selections[other_desk]["winners"]
-                
-                # For this desk, find overlapping models and try to swap them with better alternatives
-                overlapping_on_desk = overlap & desk_selections[desk]["winners"]
-                
-                for overlap_model in sorted(overlapping_on_desk):
-                    # Find the next best model not in winners of either desk
-                    for candidate in desk_selections[desk]["ranked_pool"]:
-                        if candidate not in desk_selections[desk]["winners"] and candidate not in other_winners:
-                            # Swap: remove overlapping model, add this candidate
-                            desk_selections[desk]["winners"].discard(overlap_model)
-                            desk_selections[desk]["winners"].add(candidate)
-                            break
+            btc_winners = desk_selections["btc"]["winners"]
+            overlapping_on_basket = overlap & desk_selections["basket"]["winners"]
+            for overlap_model in sorted(overlapping_on_basket):
+                for candidate in desk_selections["basket"]["ranked_pool"]:
+                    if (
+                        candidate not in desk_selections["basket"]["winners"]
+                        and candidate not in btc_winners
+                    ):
+                        desk_selections["basket"]["winners"].discard(overlap_model)
+                        desk_selections["basket"]["winners"].add(candidate)
+                        break
         
         # Apply selections
         for desk in ("btc", "basket"):

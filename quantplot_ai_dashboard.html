@@ -375,7 +375,7 @@
         let lastServerStartedAt = null;
         let btcPrevPrice = null;
         let basketPrevPrice = null;
-        let deskPnlScope = 'selected';
+        let deskPnlScope = 'all';
 
         function deskPnlFromStats(stats, desk, selectedOnly) {
             const keyPnl = desk === 'btc' ? 'btc_pnl' : 'basket_pnl';
@@ -492,7 +492,9 @@
 
         function pushChartPoint(chart, ts, value) {
             chart.data.labels.push(ts);
-            chart.data.datasets[0].data.push(Number(value.toFixed(2)));
+            const raw = Number(value || 0);
+            const rounded = Math.abs(raw) < 1 ? Number(raw.toFixed(4)) : Number(raw.toFixed(2));
+            chart.data.datasets[0].data.push(rounded);
             if (chart.data.labels.length > 60) { chart.data.labels.shift(); chart.data.datasets[0].data.shift(); }
             chart.update('none');
         }
@@ -813,8 +815,13 @@
             // Desk prices & PnL — use model_stats from server (real fill ledger in live mode)
             const modelStats = s.model_stats || {};
             const selectedOnlyScope = deskPnlScope === 'selected';
-            let btcPnl = deskPnlFromStats(modelStats, 'btc', selectedOnlyScope);
-            let basketPnl = deskPnlFromStats(modelStats, 'basket', selectedOnlyScope);
+            const serverDeskPnl = s.desk_pnl || {};
+            let btcPnl = Number.isFinite(Number(serverDeskPnl.btc))
+                ? Number(serverDeskPnl.btc)
+                : deskPnlFromStats(modelStats, 'btc', selectedOnlyScope);
+            let basketPnl = Number.isFinite(Number(serverDeskPnl.basket))
+                ? Number(serverDeskPnl.basket)
+                : deskPnlFromStats(modelStats, 'basket', selectedOnlyScope);
             const strictLive = !!(s.status && s.status.no_simulation && s.status.mode === 'LIVE');
             if (basketPriceDeskEl) basketPriceDeskEl.innerText = '$' + Number(s.prices.basket).toLocaleString(undefined, { maximumFractionDigits: 2 });
             let btcDeskDisplayPnl = btcPnl;
@@ -869,7 +876,7 @@
             emptyBtcEl.style.display    = btcSelected.length    ? 'none' : 'block';
             emptyBasketEl.style.display = basketSelected.length ? 'none' : 'block';
 
-            activeModelsEl.innerText = String(btcSelected.length + basketSelected.length);
+            activeModelsEl.innerText = String(new Set([...btcSelected, ...basketSelected]).size);
 
             applyPnlText(pnlEl, totalPnl);
             renderBinancePnl(appLedgerPnl, s.binance_pnl || null, s.ts || null);
