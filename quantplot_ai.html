@@ -386,7 +386,7 @@
             }, 0);
         }
 
-        function renderDeskCoinLog(liveLedger, desk, targetEl) {
+        function renderDeskCoinLog(liveLedger, desk, targetEl, logs) {
             if (!targetEl) return;
             const rows = [];
             for (const [key, value] of Object.entries(liveLedger || {})) {
@@ -408,20 +408,45 @@
                     notional: Math.abs(openQty * avgEntry),
                 });
             }
+
+            for (const line of (logs || [])) {
+                if (!line.includes(' LIVE ') || !line.includes('(order ')) continue;
+                const match = line.match(/\[([^\]]+)\]\s+(.+?)\s+LIVE\s+(\w+)\s+(LONG|SHORT)\s+\$([0-9.]+)\s+@\s+([0-9.,]+)\s+\(order\s+([^,\)]+)/);
+                if (!match) continue;
+                const [, time, model, symbol, side, amount, price, orderId] = match;
+                const fillDesk = symbol === 'BTCUSDT' ? 'btc' : 'basket';
+                if (fillDesk !== desk) continue;
+                const entry = Number(String(price || '0').replace(/,/g, ''));
+                const notional = Number(amount || 0);
+                rows.push({
+                    model,
+                    symbol,
+                    side,
+                    qty: entry > 0 ? (notional / entry) : 0,
+                    entry,
+                    notional,
+                    fillTime: time,
+                    orderId: String(orderId || '').trim(),
+                });
+            }
+
             rows.sort((a, b) => b.notional - a.notional);
             if (!rows.length) {
                 targetEl.innerHTML = '<div class="coin-log-title">Bought/Sold Coins</div><div class="coin-log-empty">No fills for this desk yet</div>';
                 return;
             }
+
             targetEl.innerHTML = '<div class="coin-log-title">Bought/Sold Coins</div>' + rows.map((row) => {
                 const sideColor = row.side === 'LONG' ? '#02c076' : row.side === 'SHORT' ? '#f84960' : '#848e9c';
                 return '<div class="coin-line">'
+                    + (row.fillTime ? '<span style="color:#9aa3b2">FILL ' + row.fillTime + '</span> ' : '')
                     + '<span style="color:#eaecef">' + row.model + '</span>'
                     + ' | <span style="color:#9aa3b2">' + row.symbol + '</span>'
                     + ' | <span style="color:' + sideColor + ';font-weight:600">' + row.side + '</span>'
                     + ' | qty ' + row.qty.toFixed(6)
                     + ' @ $' + row.entry.toFixed(2)
                     + ' = $' + row.notional.toFixed(2)
+                    + (row.orderId ? ' | order ' + row.orderId : '')
                     + '</div>';
             }).join('');
         }
@@ -859,8 +884,8 @@
             const basketLogs = s.logs.filter(l => l.includes('[BASKET]') || !l.includes('[BTC]'));
             logBtcEl.innerHTML    = btcLogs.map(msg    => '<div>' + msg + '</div>').join('');
             logBasketEl.innerHTML = basketLogs.map(msg => '<div>' + msg + '</div>').join('');
-            renderDeskCoinLog(s.live_ledger || {}, 'btc', coinsBtcEl);
-            renderDeskCoinLog(s.live_ledger || {}, 'basket', coinsBasketEl);
+            renderDeskCoinLog(s.live_ledger || {}, 'btc', coinsBtcEl, s.logs || []);
+            renderDeskCoinLog(s.live_ledger || {}, 'basket', coinsBasketEl, s.logs || []);
 
             btcPrevPrice = null;
             basketPrevPrice = null;
