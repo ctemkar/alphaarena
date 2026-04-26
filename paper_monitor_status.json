@@ -1,0 +1,23 @@
+{
+  "updated_at": "2026-04-26T11:39:03",
+  "elapsed_min": 1,
+  "signals": 70,
+  "longs": 62,
+  "shorts": 8,
+  "net_pnl_usd": -38.8177,
+  "fees_usd": 0.0,
+  "gross_pnl_usd": -38.8177,
+  "trades": 0,
+  "wins": 0,
+  "losses": 0,
+  "open_positions": 0,
+  "win_rate_pct": 0.0,
+  "kill_switch": true,
+  "halt_reason": "Daily loss guardrail hit ($100.00)",
+  "verdict": "FAIL - paper halted by drawdown guardrail",
+  "final": true,
+  "status": "halted",
+  "repair_count": 0,
+  "last_repair_reasons": [],
+  "last_repair_actions": []
+}

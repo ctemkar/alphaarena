@@ -83,7 +83,14 @@ def _load_dotenv(path: str = ".env") -> None:
         key, val = line.split("=", 1)
         key = key.strip()
         val = val.strip().strip('"').strip("'")
-        if key and key not in os.environ:
+        if not key:
+            continue
+        # Strategy tuning lives under ALPHA_* and should follow .env defaults
+        # even if the shell has stale exported values from earlier runs.
+        if key.startswith("ALPHA_"):
+            os.environ[key] = val
+            continue
+        if key not in os.environ:
             os.environ[key] = val
 
 
@@ -94,6 +101,7 @@ PUTER_AUTH_TOKEN = os.getenv("PUTER_AUTH_TOKEN", "") or os.getenv("puterAuthToke
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "") or os.getenv("ALPHA_OPENROUTER_API_KEY", "")
 OPENROUTER_URL = os.getenv("ALPHA_OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
 LIVE_TRADING_ENABLED = os.getenv("ALPHA_LIVE_TRADING", "0").strip().lower() in {"1", "true", "yes", "on"}
+PAPER_MODE_ENABLED = os.getenv("ALPHA_PAPER_MODE", "0").strip().lower() in {"1", "true", "yes", "on"}
 USE_FUTURES = os.getenv("ALPHA_USE_FUTURES", "1").strip().lower() not in {"0", "false", "no", "off"}
 try:
     ANALYTICS_FEE_BPS = float(os.getenv("ALPHA_ANALYTICS_FEE_BPS", "10"))
@@ -108,6 +116,11 @@ try:
     LIVE_ORDER_USD = float(os.getenv("ALPHA_LIVE_ORDER_USD", "80"))
 except ValueError:
     LIVE_ORDER_USD = 80.0
+try:
+    _basket_env = os.getenv("ALPHA_BASKET_ORDER_USD", "")
+    BASKET_ORDER_USD = float(_basket_env) if _basket_env.strip() else LIVE_ORDER_USD
+except ValueError:
+    BASKET_ORDER_USD = LIVE_ORDER_USD
 try:
     MAX_ORDER_USD = float(os.getenv("ALPHA_MAX_ORDER_USD", "120"))
 except ValueError:
@@ -494,7 +507,9 @@ class ArenaState:
         self.price_history: collections.deque[dict] = collections.deque(maxlen=20)
         self.live_feed = False
         self.live_trading = bool(LIVE_TRADING_ENABLED and BINANCE_API_KEY and BINANCE_API_SECRET)
+        self.paper_mode = bool(PAPER_MODE_ENABLED)
         self.live_order_usd = max(5.0, min(LIVE_ORDER_USD, MAX_ORDER_USD, HARD_MAX_ORDER_USD))
+        self.basket_order_usd = max(5.0, min(BASKET_ORDER_USD, MAX_ORDER_USD, HARD_MAX_ORDER_USD))
         self.max_order_usd = max(5.0, min(MAX_ORDER_USD, HARD_MAX_ORDER_USD))
         self.daily_loss_limit_usd = max(10.0, DAILY_LOSS_LIMIT_USD)
         self.profit_lock_enabled = PROFIT_LOCK_ENABLED
@@ -520,12 +535,29 @@ class ArenaState:
         self.live_order_queue: queue.Queue[tuple[str, str, str, str, float, str, str]] = queue.Queue()
         # Live fill ledger: keyed by (model_name, desk, symbol)
         self.live_ledger: dict[tuple[str, str, str], dict] = {}
+        # Paper fill ledger: separate from live fills so paper runs are isolated.
+        self.paper_ledger: dict[tuple[str, str, str], dict] = {}
+        self.paper_total_fees_usd: float = 0.0
         # Binance position cache from /fapi/v2/positionRisk
         self.live_positions: dict[str, dict] = {}
         self.live_positions_last_refresh: float = 0.0
         self.live_positions_refresh_seconds: float = 15.0
         self.binance_pnl_refresh_seconds = max(5, BINANCE_PNL_REFRESH_SECONDS)
         self.binance_pnl_last_refresh = 0.0
+        self.binance_lifetime_refresh_seconds = 900.0
+        self.binance_lifetime_last_refresh = 0.0
+        self.binance_lifetime_income_cache = {
+            "realized_pnl_usd": 0.0,
+            "commission_usd": 0.0,
+            "funding_fee_usd": 0.0,
+            "income_other_usd": 0.0,
+            "transfer_usd": 0.0,
+            "net_income_ex_transfer_usd": 0.0,
+            "net_income_incl_transfer_usd": 0.0,
+            "entries_scanned": 0,
+            "updated_at": "",
+            "error": "",
+        }
         self.binance_margin_baseline: float | None = None
         self.binance_tracked_unrealized_baseline: float | None = None
         self.binance_pnl = {
@@ -540,6 +572,23 @@ class ArenaState:
             "income_other_usd": 0.0,
             "net_income_usd": 0.0,
             "income_window_hours": 0.0,
+            "day_realized_pnl_usd": 0.0,
+            "day_commission_usd": 0.0,
+            "day_funding_fee_usd": 0.0,
+            "day_income_other_usd": 0.0,
+            "day_transfer_usd": 0.0,
+            "day_net_income_ex_transfer_usd": 0.0,
+            "day_net_income_incl_transfer_usd": 0.0,
+            "day_window_label": "",
+            "lifetime_realized_pnl_usd": 0.0,
+            "lifetime_commission_usd": 0.0,
+            "lifetime_funding_fee_usd": 0.0,
+            "lifetime_income_other_usd": 0.0,
+            "lifetime_transfer_usd": 0.0,
+            "lifetime_net_income_ex_transfer_usd": 0.0,
+            "lifetime_net_income_incl_transfer_usd": 0.0,
+            "lifetime_entries_scanned": 0,
+            "lifetime_updated_at": "",
             "wallet_balance_usd": 0.0,
             "margin_balance_usd": 0.0,
             "updated_at": "",
@@ -614,6 +663,7 @@ class ArenaState:
             },
         }
         self.logs = []
+        self.desk_logs = {"btc": [], "basket": []}
         self.message_center: list[str] = []
         self.away_mode = False
         self.server_started_at = datetime.now().isoformat()
@@ -830,6 +880,7 @@ class ArenaState:
             self._summary_cache_ts = 0.0
             self._summary_cache = fresh_summary
             self.logs = []
+            self.desk_logs = {"btc": [], "basket": []}
 
             # Reset per-model desk metrics while keeping selections/config intact.
             for m in self.models.values():
@@ -858,10 +909,8 @@ class ArenaState:
 
     def _desk_symbols(self, desk: str) -> list[str]:
         if desk == "basket":
-            # Keep BTCUSDT dedicated to BTC desk when BTC models are actively selected.
-            if self.selected_count("btc") > 0 and not self.paused_desks.get("btc", False):
-                return ["ETHUSDT", "SOLUSDT", "BNBUSDT"]
-            return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
+            # Keep BTC fully dedicated to BTC desk to avoid correlated double-exposure.
+            return ["ETHUSDT", "SOLUSDT", "BNBUSDT"]
         if desk == "btc" and self.allow_cross_symbol_fallback and self.allow_btc_desk_fallback:
             return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
         return ["BTCUSDT"]
@@ -902,8 +951,11 @@ class ArenaState:
         return total
 
     def _effective_portfolio_pnl(self) -> float:
-        if self.strict_no_simulation and self.binance_pnl.get("available"):
-            return float(self.binance_pnl.get("equity_delta_usd", 0.0) or 0.0)
+        if self.strict_no_simulation and self.live_trading:
+            if self.paper_mode:
+                return self._ledger_desk_total_pnl("btc", self.paper_ledger) + self._ledger_desk_total_pnl("basket", self.paper_ledger)
+            if self.binance_pnl.get("available"):
+                return float(self.binance_pnl.get("equity_delta_usd", 0.0) or 0.0)
         return self._portfolio_pnl()
 
     def _flatten_internal_positions(self, reason: str) -> None:
@@ -953,7 +1005,8 @@ class ArenaState:
         if not self.kill_switch and current_pnl <= -self.daily_loss_limit_usd:
             self.kill_switch = True
             self.halt_reason = f"Daily loss guardrail hit (${self.daily_loss_limit_usd:.2f})"
-            self.add_log(f"LIVE TRADING HALTED: {self.halt_reason}")
+            halt_label = "PAPER RUN HALTED" if self.paper_mode else "LIVE TRADING HALTED"
+            self.add_log(f"{halt_label}: {self.halt_reason}")
 
     def _binance_signed_request(self, method: str, path: str, params: dict, *, futures: bool = False) -> dict:
         if not BINANCE_API_KEY or not BINANCE_API_SECRET:
@@ -1015,6 +1068,97 @@ class ArenaState:
                     return 0.0
         return 0.0
 
+    @staticmethod
+    def _summarize_income_rows(rows: list[dict]) -> dict:
+        realized = 0.0
+        commission = 0.0
+        funding_fee = 0.0
+        income_other = 0.0
+        transfer = 0.0
+        for rec in rows or []:
+            income_type = str(rec.get("incomeType") or "")
+            try:
+                income_val = float(rec.get("income", "0") or 0.0)
+            except Exception:
+                continue
+            if income_type == "REALIZED_PNL":
+                realized += income_val
+            elif income_type == "COMMISSION":
+                commission += income_val
+            elif income_type == "FUNDING_FEE":
+                funding_fee += income_val
+            elif income_type == "TRANSFER":
+                transfer += income_val
+            else:
+                income_other += income_val
+        net_ex_transfer = realized + commission + funding_fee + income_other
+        net_incl_transfer = net_ex_transfer + transfer
+        return {
+            "realized_pnl_usd": realized,
+            "commission_usd": commission,
+            "funding_fee_usd": funding_fee,
+            "income_other_usd": income_other,
+            "transfer_usd": transfer,
+            "net_income_ex_transfer_usd": net_ex_transfer,
+            "net_income_incl_transfer_usd": net_incl_transfer,
+            "entries_scanned": len(rows or []),
+        }
+
+    def _refresh_binance_lifetime_income_if_due(self, end_ms: int) -> dict:
+        now_mono = time.monotonic()
+        if now_mono - self.binance_lifetime_last_refresh < float(self.binance_lifetime_refresh_seconds):
+            return dict(self.binance_lifetime_income_cache)
+
+        self.binance_lifetime_last_refresh = now_mono
+        max_pages = 20
+        cursor_end = end_ms
+        all_rows: list[dict] = []
+        try:
+            for _ in range(max_pages):
+                rows = self._binance_signed_get(
+                    "/fapi/v1/income",
+                    {
+                        "startTime": 0,
+                        "endTime": cursor_end,
+                        "limit": 1000,
+                    },
+                    futures=True,
+                )
+                batch = rows or []
+                if not batch:
+                    break
+                all_rows.extend(batch)
+                if len(batch) < 1000:
+                    break
+
+                min_ts = None
+                for rec in batch:
+                    try:
+                        ts = int(rec.get("time", 0) or 0)
+                    except Exception:
+                        ts = 0
+                    if min_ts is None or (ts > 0 and ts < min_ts):
+                        min_ts = ts
+                if not min_ts or min_ts <= 1:
+                    break
+                next_cursor = min_ts - 1
+                if next_cursor >= cursor_end:
+                    break
+                cursor_end = next_cursor
+
+            summary = self._summarize_income_rows(all_rows)
+            summary["updated_at"] = now_ts()
+            summary["error"] = ""
+            self.binance_lifetime_income_cache = summary
+            return dict(summary)
+        except Exception as exc:
+            cached = dict(self.binance_lifetime_income_cache)
+            cached["error"] = str(exc)[:140]
+            if not cached.get("updated_at"):
+                cached["updated_at"] = now_ts()
+            self.binance_lifetime_income_cache = cached
+            return dict(cached)
+
     def _refresh_binance_pnl_if_due(self) -> None:
         now_mono = time.monotonic()
         if now_mono - self.binance_pnl_last_refresh < float(self.binance_pnl_refresh_seconds):
@@ -1034,6 +1178,23 @@ class ArenaState:
                 "income_other_usd": 0.0,
                 "net_income_usd": 0.0,
                 "income_window_hours": 0.0,
+                "day_realized_pnl_usd": 0.0,
+                "day_commission_usd": 0.0,
+                "day_funding_fee_usd": 0.0,
+                "day_income_other_usd": 0.0,
+                "day_transfer_usd": 0.0,
+                "day_net_income_ex_transfer_usd": 0.0,
+                "day_net_income_incl_transfer_usd": 0.0,
+                "day_window_label": "",
+                "lifetime_realized_pnl_usd": 0.0,
+                "lifetime_commission_usd": 0.0,
+                "lifetime_funding_fee_usd": 0.0,
+                "lifetime_income_other_usd": 0.0,
+                "lifetime_transfer_usd": 0.0,
+                "lifetime_net_income_ex_transfer_usd": 0.0,
+                "lifetime_net_income_incl_transfer_usd": 0.0,
+                "lifetime_entries_scanned": 0,
+                "lifetime_updated_at": "",
                 "wallet_balance_usd": 0.0,
                 "margin_balance_usd": 0.0,
                 "updated_at": now_ts(),
@@ -1049,6 +1210,7 @@ class ArenaState:
             lookback_hours = max(0.25, float(BINANCE_INCOME_LOOKBACK_HOURS))
             end_ms = int(time.time() * 1000)
             start_ms = max(0, end_ms - int(lookback_hours * 3600 * 1000))
+
             income_rows = self._binance_signed_get(
                 "/fapi/v1/income",
                 {
@@ -1058,25 +1220,22 @@ class ArenaState:
                 },
                 futures=True,
             )
-            realized_pnl = 0.0
-            commission = 0.0
-            funding_fee = 0.0
-            income_other = 0.0
-            for rec in income_rows or []:
-                income_type = str(rec.get("incomeType") or "")
-                try:
-                    income_val = float(rec.get("income", "0") or 0.0)
-                except Exception:
-                    continue
-                if income_type == "REALIZED_PNL":
-                    realized_pnl += income_val
-                elif income_type == "COMMISSION":
-                    commission += income_val
-                elif income_type == "FUNDING_FEE":
-                    funding_fee += income_val
-                else:
-                    income_other += income_val
-            net_income = realized_pnl + commission + funding_fee + income_other
+            win_summary = self._summarize_income_rows(income_rows)
+
+            utc_day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            day_start_ms = int(utc_day_start.timestamp() * 1000)
+            day_rows = self._binance_signed_get(
+                "/fapi/v1/income",
+                {
+                    "startTime": day_start_ms,
+                    "endTime": end_ms,
+                    "limit": 1000,
+                },
+                futures=True,
+            )
+            day_summary = self._summarize_income_rows(day_rows)
+            lifetime_summary = self._refresh_binance_lifetime_income_if_due(end_ms)
+
             tracked_symbols = {"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"}
             tracked_unrealized = 0.0
             for p in account.get("positions", []) or []:
@@ -1093,24 +1252,44 @@ class ArenaState:
                     tracked_unrealized += float(p.get("unrealizedProfit", "0") or 0.0)
                 except Exception:
                     continue
+
             if self.binance_margin_baseline is None:
                 self.binance_margin_baseline = margin_balance
             if self.binance_tracked_unrealized_baseline is None:
                 self.binance_tracked_unrealized_baseline = tracked_unrealized
+
             equity_delta = margin_balance - float(self.binance_margin_baseline)
             tracked_delta = tracked_unrealized - float(self.binance_tracked_unrealized_baseline)
+
             self.binance_pnl = {
                 "available": True,
                 "equity_delta_usd": equity_delta,
                 "unrealized_usd": unrealized,
                 "tracked_delta_usd": tracked_delta,
                 "tracked_unrealized_usd": tracked_unrealized,
-                "realized_pnl_usd": realized_pnl,
-                "commission_usd": commission,
-                "funding_fee_usd": funding_fee,
-                "income_other_usd": income_other,
-                "net_income_usd": net_income,
+                "realized_pnl_usd": float(win_summary["realized_pnl_usd"]),
+                "commission_usd": float(win_summary["commission_usd"]),
+                "funding_fee_usd": float(win_summary["funding_fee_usd"]),
+                "income_other_usd": float(win_summary["income_other_usd"]),
+                "net_income_usd": float(win_summary["net_income_ex_transfer_usd"]),
                 "income_window_hours": lookback_hours,
+                "day_realized_pnl_usd": float(day_summary["realized_pnl_usd"]),
+                "day_commission_usd": float(day_summary["commission_usd"]),
+                "day_funding_fee_usd": float(day_summary["funding_fee_usd"]),
+                "day_income_other_usd": float(day_summary["income_other_usd"]),
+                "day_transfer_usd": float(day_summary["transfer_usd"]),
+                "day_net_income_ex_transfer_usd": float(day_summary["net_income_ex_transfer_usd"]),
+                "day_net_income_incl_transfer_usd": float(day_summary["net_income_incl_transfer_usd"]),
+                "day_window_label": utc_day_start.strftime("UTC %Y-%m-%d"),
+                "lifetime_realized_pnl_usd": float(lifetime_summary.get("realized_pnl_usd", 0.0) or 0.0),
+                "lifetime_commission_usd": float(lifetime_summary.get("commission_usd", 0.0) or 0.0),
+                "lifetime_funding_fee_usd": float(lifetime_summary.get("funding_fee_usd", 0.0) or 0.0),
+                "lifetime_income_other_usd": float(lifetime_summary.get("income_other_usd", 0.0) or 0.0),
+                "lifetime_transfer_usd": float(lifetime_summary.get("transfer_usd", 0.0) or 0.0),
+                "lifetime_net_income_ex_transfer_usd": float(lifetime_summary.get("net_income_ex_transfer_usd", 0.0) or 0.0),
+                "lifetime_net_income_incl_transfer_usd": float(lifetime_summary.get("net_income_incl_transfer_usd", 0.0) or 0.0),
+                "lifetime_entries_scanned": int(lifetime_summary.get("entries_scanned", 0) or 0),
+                "lifetime_updated_at": str(lifetime_summary.get("updated_at") or ""),
                 "wallet_balance_usd": wallet_balance,
                 "margin_balance_usd": margin_balance,
                 "updated_at": now_ts(),
@@ -1129,12 +1308,28 @@ class ArenaState:
                 "income_other_usd": 0.0,
                 "net_income_usd": 0.0,
                 "income_window_hours": 0.0,
+                "day_realized_pnl_usd": 0.0,
+                "day_commission_usd": 0.0,
+                "day_funding_fee_usd": 0.0,
+                "day_income_other_usd": 0.0,
+                "day_transfer_usd": 0.0,
+                "day_net_income_ex_transfer_usd": 0.0,
+                "day_net_income_incl_transfer_usd": 0.0,
+                "day_window_label": "",
+                "lifetime_realized_pnl_usd": 0.0,
+                "lifetime_commission_usd": 0.0,
+                "lifetime_funding_fee_usd": 0.0,
+                "lifetime_income_other_usd": 0.0,
+                "lifetime_transfer_usd": 0.0,
+                "lifetime_net_income_ex_transfer_usd": 0.0,
+                "lifetime_net_income_incl_transfer_usd": 0.0,
+                "lifetime_entries_scanned": 0,
+                "lifetime_updated_at": "",
                 "wallet_balance_usd": 0.0,
                 "margin_balance_usd": 0.0,
                 "updated_at": now_ts(),
                 "error": str(exc)[:140],
             }
-
     def _place_live_market_order(self, symbol: str, side: str, quote_usd: float) -> dict:
         """Place a USDT-M Futures market order. side='BUY'=long, 'SELL'=short."""
         symbol_min_usd = self._symbol_min_notional_usd(symbol)
@@ -1235,10 +1430,96 @@ class ArenaState:
                 L["open_qty"] = 0.0
                 L["avg_entry"] = 0.0
 
-    def _ledger_pnl(self, model_name: str, desk: str, symbol: str) -> float:
+    def _paper_fill_qty(self, symbol: str, order_usd: float) -> tuple[float, float]:
+        """Return (mark_price, executable_qty) for a paper fill at current mark."""
+        price_key = _SYMBOL_PRICE_KEY.get(symbol, "btc")
+        mark_price = float(self.prices.get(price_key, 0.0) or 0.0)
+        if mark_price <= 0.0:
+            return 0.0, 0.0
+        precision = _FUTURES_QTY_PRECISION.get(symbol, 3)
+        factor = 10 ** precision
+        min_qty = 1.0 / factor
+        raw_qty = max(float(order_usd), 0.0) / mark_price
+        qty = math.floor(raw_qty * factor + 1e-9) / factor
+        if order_usd + 1e-9 >= self._symbol_min_notional_usd(symbol) and qty < min_qty:
+            qty = min_qty
+        return mark_price, max(qty, 0.0)
+
+    def _record_paper_fill(
+        self,
+        model_name: str,
+        desk: str,
+        symbol: str,
+        side_label: str,
+        avg_price: float,
+        executed_qty: float,
+        signal_arm: str,
+    ) -> None:
+        """Record a paper fill and apply fee/slippage costs on every fill."""
+        key = (model_name, desk, symbol)
+        if key not in self.paper_ledger:
+            self.paper_ledger[key] = {
+                "realized_pnl": 0.0, "open_qty": 0.0, "avg_entry": 0.0,
+                "wins": 0, "losses": 0, "trades": 0,
+            }
+        L = self.paper_ledger[key]
+        is_long = (side_label == "LONG")
+        fill_qty = max(float(executed_qty), 0.0)
+        open_qty = float(L.get("open_qty", 0.0) or 0.0)
+        if fill_qty <= 1e-12:
+            return
+
+        cost_rate = (ANALYTICS_FEE_BPS + ANALYTICS_SLIPPAGE_BPS) / 10000.0
+        fill_cost = (fill_qty * avg_price) * cost_rate
+        L["realized_pnl"] -= fill_cost
+        self.paper_total_fees_usd += fill_cost
+
+        if abs(open_qty) < 1e-12:
+            L["open_qty"] = fill_qty if is_long else -fill_qty
+            L["avg_entry"] = avg_price
+            L["trades"] += 1
+            return
+
+        if (open_qty > 0 and is_long) or (open_qty < 0 and not is_long):
+            total_qty = abs(open_qty) + fill_qty
+            L["avg_entry"] = (L["avg_entry"] * abs(open_qty) + avg_price * fill_qty) / max(total_qty, 1e-12)
+            L["open_qty"] = total_qty if is_long else -total_qty
+            return
+
+        close_qty = min(fill_qty, abs(open_qty))
+        if open_qty > 0:
+            gross_pnl = (avg_price - L["avg_entry"]) * close_qty
+        else:
+            gross_pnl = (L["avg_entry"] - avg_price) * close_qty
+        L["realized_pnl"] += gross_pnl
+        est_cost = close_qty * avg_price * cost_rate
+        net_pnl = gross_pnl - est_cost
+        self._canary_on_realized_trade(signal_arm, net_pnl)
+        if net_pnl > 0:
+            L["wins"] += 1
+        elif net_pnl < 0:
+            L["losses"] += 1
+        L["trades"] += 1
+
+        flip_qty = fill_qty - close_qty
+        if flip_qty > 1e-12:
+            L["open_qty"] = flip_qty if is_long else -flip_qty
+            L["avg_entry"] = avg_price
+        else:
+            L["open_qty"] = 0.0
+            L["avg_entry"] = 0.0
+
+    def _ledger_pnl(
+        self,
+        model_name: str,
+        desk: str,
+        symbol: str,
+        ledger: dict[tuple[str, str, str], dict] | None = None,
+    ) -> float:
         """Realized + mark-to-market unrealized P&L for one ledger entry. Under self.lock."""
         key = (model_name, desk, symbol)
-        L = self.live_ledger.get(key)
+        source = ledger if ledger is not None else (self.paper_ledger if self.paper_mode else self.live_ledger)
+        L = source.get(key)
         if not L:
             return 0.0
         realized = L["realized_pnl"]
@@ -1252,14 +1533,45 @@ class ArenaState:
         unrealized = open_qty * (mark - L["avg_entry"])  # positive = long profit, negative = long loss
         return realized + unrealized
 
-    def _ledger_model_desk_pnl(self, model_name: str, desk: str) -> float:
+    def _ledger_model_desk_pnl(
+        self,
+        model_name: str,
+        desk: str,
+        ledger: dict[tuple[str, str, str], dict] | None = None,
+    ) -> float:
         """Sum realized + unrealized P&L for one model on one desk. Under self.lock."""
         symbols = self._desk_symbols(desk)
-        return sum(self._ledger_pnl(model_name, desk, sym) for sym in symbols)
+        return sum(self._ledger_pnl(model_name, desk, sym, ledger=ledger) for sym in symbols)
 
-    def _ledger_desk_total_pnl(self, desk: str) -> float:
+    def _ledger_desk_total_pnl(
+        self,
+        desk: str,
+        ledger: dict[tuple[str, str, str], dict] | None = None,
+    ) -> float:
         """Sum realized + unrealized P&L across all models for a desk. Under self.lock."""
-        return sum(self._ledger_model_desk_pnl(nm, desk) for nm in self.models)
+        return sum(self._ledger_model_desk_pnl(nm, desk, ledger=ledger) for nm in self.models)
+
+    @staticmethod
+    def _ledger_summary(ledger: dict[tuple[str, str, str], dict]) -> dict:
+        trades = 0
+        wins = 0
+        losses = 0
+        open_positions = 0
+        for entry in ledger.values():
+            trades += int(entry.get("trades", 0) or 0)
+            wins += int(entry.get("wins", 0) or 0)
+            losses += int(entry.get("losses", 0) or 0)
+            if abs(float(entry.get("open_qty", 0.0) or 0.0)) > 1e-12:
+                open_positions += 1
+        decided = wins + losses
+        win_rate_pct = (wins / decided * 100.0) if decided else 0.0
+        return {
+            "trades": trades,
+            "wins": wins,
+            "losses": losses,
+            "open_positions": open_positions,
+            "win_rate_pct": round(win_rate_pct, 2),
+        }
 
     def _refresh_binance_positions_if_due(self) -> None:
         """Poll /fapi/v2/positionRisk for open exchange positions (non-fatal if unavailable).
@@ -1744,7 +2056,7 @@ class ArenaState:
             self._evaluate_guardrails()
             if self.pause_all_desks or self.paused_desks.get(desk, False):
                 return False
-            if not self.live_trading:
+            if not self.live_trading and not self.paper_mode:
                 return False
             if self.require_live_feed and not self.live_feed:
                 return False
@@ -1757,20 +2069,23 @@ class ArenaState:
                 self.add_log(f"{model_name} LIVE throttled: global entry already routed this tick")
                 return False
             symbols = self._desk_symbols(desk)
-            total_order_usd = self.live_order_usd
+            total_order_usd = self.basket_order_usd if desk == "basket" else self.live_order_usd
 
         # Keep hard blocks for auth errors, but allow automatic recovery from
         # temporary insufficient-funds blocks once balance is sufficient.
         if self.live_blocked and "Insufficient USDT" not in self.live_blocked_reason:
             return False
 
-        # Futures preflight: read balance for diagnostics only.
-        try:
-            free_usdt = self._get_futures_usdt_balance()
-        except Exception as exc:
-            with self.lock:
-                self.add_log(f"{model_name} LIVE precheck failed: {exc}")
-            return False
+        # Futures preflight: use exchange balance for live, synthetic high balance in paper.
+        if self.paper_mode:
+            free_usdt = 1.0e9
+        else:
+            try:
+                free_usdt = self._get_futures_usdt_balance()
+            except Exception as exc:
+                with self.lock:
+                    self.add_log(f"{model_name} LIVE precheck failed: {exc}")
+                return False
         min_exec_usd = self._global_execution_min_notional_usd()
         effective_order_usd = max(total_order_usd, min_exec_usd)
         effective_max_order_usd = max(self.max_order_usd, min_exec_usd)
@@ -1908,8 +2223,6 @@ class ArenaState:
             allocations = scaled_allocations
             required_usdt = sum(allocations.values())
 
-        for symbol, order_usd in allocations.items():
-            self.live_order_queue.put((model_name, desk, symbol, side_label, order_usd, signal_arm, signal_provider))
         with self.lock:
             self.last_live_entry_tick_by_desk[desk] = self.tick_count
             self.last_live_entry_tick_global = self.tick_count
@@ -1917,11 +2230,30 @@ class ArenaState:
             for symbol in allocations:
                 self.last_live_symbol_side_ts[(symbol, side_label)] = now_epoch
                 self.last_live_symbol_ts[symbol] = now_epoch
-            self.add_log(
-                f"{model_name} queued LIVE {side_label} on "
-                f"{', '.join(f'{s}:${allocations[s]:.2f}' for s in allocations)} "
-                f"(total ${required_usdt:.2f})"
-            )
+            if self.paper_mode:
+                routed_symbols: list[str] = []
+                for symbol, order_usd in allocations.items():
+                    avg_price, qty = self._paper_fill_qty(symbol, order_usd)
+                    if avg_price <= 0.0 or qty <= 0.0:
+                        continue
+                    self._record_paper_fill(model_name, desk, symbol, side_label, avg_price, qty, signal_arm)
+                    routed_symbols.append(f"{symbol}:${order_usd:.2f}")
+                if not routed_symbols:
+                    self.add_log(f"{model_name} [PAPER] skipped: invalid mark/qty for all allocations")
+                    return False
+                self.add_log(
+                    f"{model_name} [PAPER] {side_label} on "
+                    f"{chr(44).join(routed_symbols)} "
+                    f"(total ${sum(allocations.values()):.2f}) — no real order placed"
+                )
+            else:
+                for symbol, order_usd in allocations.items():
+                    self.live_order_queue.put((model_name, desk, symbol, side_label, order_usd, signal_arm, signal_provider))
+                self.add_log(
+                    f"{model_name} queued LIVE {side_label} on "
+                    f"{chr(44).join(f'{s}:${allocations[s]:.2f}' for s in allocations)} "
+                    f"(total ${sum(allocations.values()):.2f})"
+                )
         return True
 
     def _execute_live_signal(
@@ -1947,7 +2279,9 @@ class ArenaState:
                 side_label=side_label,
                 total_order_usd=effective_order_usd,
                 max_order_usd=effective_max_order_usd,
-                live_trading=self.live_trading,
+                # In paper mode we still want execution planning and simulated fills
+                # even if real live trading is disabled.
+                live_trading=(self.live_trading or self.paper_mode),
                 require_live_feed=self.require_live_feed,
                 live_feed=self.live_feed,
                 kill_switch=self.kill_switch,
@@ -2006,6 +2340,32 @@ class ArenaState:
             with self.lock:
                 self.add_log(f"{model_name} CORE cutover skipped: {plan.reason}")
             return False
+
+        if self.paper_mode:
+            with self.lock:
+                self.last_live_entry_tick_by_desk[desk] = self.tick_count
+                self.last_live_entry_tick_global = self.tick_count
+                stamp = time.time()
+                routed_symbols: list[str] = []
+                for symbol, order_usd in plan.allocations.items():
+                    self.last_live_symbol_side_ts[(symbol, side_label)] = stamp
+                    self.last_live_symbol_ts[symbol] = stamp
+                    avg_price, qty = self._paper_fill_qty(symbol, order_usd)
+                    if avg_price <= 0.0 or qty <= 0.0:
+                        continue
+                    self._record_paper_fill(model_name, desk, symbol, side_label, avg_price, qty, signal_arm)
+                    routed_symbols.append(f"{symbol}:${order_usd:.2f}")
+                if not routed_symbols:
+                    self.add_log(f"{model_name} CORE [PAPER] skipped: invalid mark/qty for all allocations")
+                    return False
+                route_note = " (fallback symbol set)" if plan.used_fallback_symbols else ""
+                self.execution_core.record_cutover_routed(len(routed_symbols))
+                self.add_log(
+                    f"{model_name} CORE [PAPER] {side_label} on "
+                    f"{', '.join(routed_symbols)} "
+                    f"(total ${plan.required_usdt:.2f}){route_note} — no real order placed"
+                )
+            return True
 
         try:
             free_usdt = self._get_futures_usdt_balance()
@@ -2132,9 +2492,22 @@ class ArenaState:
         slot["trade_side"] = "FLAT"
         slot["trade_open_balance"] = START_BALANCE
 
+    def _infer_log_desk(self, message: str) -> str | None:
+        upper = message.upper()
+        is_btc = "[BTC]" in upper or "BTC DESK" in upper
+        is_basket = "[BASKET]" in upper or "BASKET DESK" in upper
+        if is_btc == is_basket:
+            return None
+        return "btc" if is_btc else "basket"
+
     def add_log(self, message: str) -> None:
-        self.logs.insert(0, f"[{now_ts()}] {message}")
+        stamped = f"[{now_ts()}] {message}"
+        self.logs.insert(0, stamped)
         del self.logs[MAX_LOGS:]
+        desk = self._infer_log_desk(message)
+        if desk:
+            self.desk_logs[desk].insert(0, stamped)
+            del self.desk_logs[desk][MAX_LOGS:]
 
     def add_message(self, message: str) -> None:
         self.message_center.insert(0, f"[{now_ts()}] {message}")
@@ -2166,7 +2539,8 @@ class ArenaState:
 
     def recalc_basket(self) -> None:
         p = self.prices
-        p["basket"] = (p["btc"] + p["eth"] * 12 + p["sol"] * 300 + p["bnb"] * 80) / 4
+        # Basket excludes BTC so it reflects alt-coin composite behavior.
+        p["basket"] = (p["eth"] * 12 + p["sol"] * 300 + p["bnb"] * 80) / 3
 
     def _mark_to_market_slot(self, model_name: str, desk: str, slot: dict, price: float) -> None:
         if not slot.get("selected"):
@@ -2227,12 +2601,13 @@ class ArenaState:
     def _model_score(self, name: str, desk: str) -> float:
         slot = self.models[name]["desk_state"][desk]
         if self.strict_no_simulation and self.live_trading:
-            # Use real fill ledger for scoring (no sim balance)
-            pnl = self._ledger_model_desk_pnl(name, desk)
+            # Use active fill ledger for scoring (paper or live, no sim balance)
+            active_ledger = self.paper_ledger if self.paper_mode else self.live_ledger
+            pnl = self._ledger_model_desk_pnl(name, desk, ledger=active_ledger)
             syms = self._desk_symbols(desk)
-            wins = sum(self.live_ledger.get((name, desk, s), {}).get("wins", 0) for s in syms)
-            losses = sum(self.live_ledger.get((name, desk, s), {}).get("losses", 0) for s in syms)
-            trades = sum(self.live_ledger.get((name, desk, s), {}).get("trades", 0) for s in syms)
+            wins = sum(active_ledger.get((name, desk, s), {}).get("wins", 0) for s in syms)
+            losses = sum(active_ledger.get((name, desk, s), {}).get("losses", 0) for s in syms)
+            trades = sum(active_ledger.get((name, desk, s), {}).get("trades", 0) for s in syms)
         else:
             pnl = float(slot.get("realized_pnl", 0.0))
             if slot.get("selected"):
@@ -2738,9 +3113,10 @@ class ArenaState:
         with self.lock:
             strict_live_mode = self.strict_no_simulation and self.live_trading
             if strict_live_mode:
-                # Real P&L from live fill ledger (realized + mark-to-market unrealized per symbol)
-                btc_pnl = self._ledger_desk_total_pnl("btc")
-                basket_pnl = self._ledger_desk_total_pnl("basket")
+                active_ledger = self.paper_ledger if self.paper_mode else self.live_ledger
+                # Strict mode P&L from active execution ledger (paper or live).
+                btc_pnl = self._ledger_desk_total_pnl("btc", ledger=active_ledger)
+                basket_pnl = self._ledger_desk_total_pnl("basket", ledger=active_ledger)
                 app_total_pnl = btc_pnl + basket_pnl
                 # Equity balances are not meaningful in strict live mode; use 0
                 btc_equity = 0.0
@@ -2765,8 +3141,9 @@ class ArenaState:
             model_stats = {}
             for nm, mm in self.models.items():
                 if strict_live_mode:
-                    btc_r = self._ledger_model_desk_pnl(nm, "btc")
-                    basket_r = self._ledger_model_desk_pnl(nm, "basket")
+                    active_ledger = self.paper_ledger if self.paper_mode else self.live_ledger
+                    btc_r = self._ledger_model_desk_pnl(nm, "btc", ledger=active_ledger)
+                    basket_r = self._ledger_model_desk_pnl(nm, "basket", ledger=active_ledger)
                     total_r = btc_r + basket_r
                 else:
                     btc_r = (
@@ -2796,10 +3173,14 @@ class ArenaState:
                 "status": {
                     "feed": "LIVE" if self.live_feed else "OFFLINE",
                     "mode": (
-                        "LIVE_BLOCKED" if (self.live_trading and self.live_blocked)
-                        else ("LIVE" if self.live_trading else "LIVE_BLOCKED")
+                        "PAPER" if self.paper_mode
+                        else (
+                            "LIVE_BLOCKED" if (self.live_trading and self.live_blocked)
+                            else ("LIVE" if self.live_trading else "LIVE_BLOCKED")
+                        )
                     ),
                     "no_simulation": self.strict_no_simulation,
+                    "paper_mode": self.paper_mode,
                     "require_live_feed": self.require_live_feed,
                     "feed_paused": self.feed_paused,
                     "feed_pause_reason": self.feed_pause_reason,
@@ -2809,6 +3190,7 @@ class ArenaState:
                     "live_blocked": self.live_blocked,
                     "live_blocked_reason": self.live_blocked_reason,
                     "order_usd": self.live_order_usd,
+                    "basket_order_usd": self.basket_order_usd,
                     "max_order_usd": self.max_order_usd,
                     "daily_loss_limit_usd": self.daily_loss_limit_usd,
                     "min_executable_order_usd": self._global_execution_min_notional_usd(),
@@ -2856,6 +3238,8 @@ class ArenaState:
                     "basket": basket_pnl,
                 },
                 "app_total_pnl_usd": app_total_pnl,
+                "paper_total_fees_usd": self.paper_total_fees_usd,
+                "paper_summary": self._ledger_summary(self.paper_ledger),
                 "models": self.models,
                 "model_stats": model_stats,
                 "start_balance": START_BALANCE,
@@ -2863,6 +3247,7 @@ class ArenaState:
                 "binance_pnl": self.binance_pnl,
                 "server_started_at": self.server_started_at,
                 "logs": self.logs[:],
+                "desk_logs": {desk: logs[:] for desk, logs in self.desk_logs.items()},
                 "message_center": self.message_center[:],
                 "ts": now_ts(),
             }
@@ -2936,6 +3321,7 @@ class ArenaHandler(SimpleHTTPRequestHandler):
             "/api/puter-token",
             "/api/message/pnl-health",
             "/api/message/recent-summary",
+            "/api/paper-mode",
         }:
             self._json(404, {"ok": False, "error": "Not found"})
             return
@@ -3145,6 +3531,30 @@ class ArenaHandler(SimpleHTTPRequestHandler):
         if route_path == "/api/message/recent-summary":
             msg = self.state.push_recent_summary_message()
             self._json(200, {"ok": True, "message": msg})
+            return
+
+        if route_path == "/api/paper-mode":
+            enabled_raw = data.get("enabled")
+            if not isinstance(enabled_raw, bool):
+                self._json(400, {"ok": False, "error": "enabled must be boolean"})
+                return
+            with self.state.lock:
+                prev = self.state.paper_mode
+                self.state.paper_mode = bool(enabled_raw)
+                changed = prev != self.state.paper_mode
+                if self.state.paper_mode and changed:
+                    self.state.paper_ledger = {}
+                    self.state.paper_total_fees_usd = 0.0
+                    self.state.kill_switch = False
+                    self.state.halt_reason = ""
+                    self.state.guardrail_day = datetime.utcnow().strftime("%Y-%m-%d")
+                    self.state.profit_lock_anchor = self.state._effective_portfolio_pnl()
+                    self.state.profit_lock_cooldown_left = 0
+                    self.state.profit_lock_reason = ""
+                    self.state.add_log("Paper ledger reset for fresh run")
+                label = "PAPER (no real orders)" if self.state.paper_mode else "LIVE (real orders)"
+                self.state.add_log(f"Paper mode {'ENABLED' if self.state.paper_mode else 'DISABLED'} \u2014 {label}")
+            self._json(200, {"ok": True, "changed": changed, "paper_mode": bool(enabled_raw)})
             return
 
         model = data.get("model", "")

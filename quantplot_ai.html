@@ -79,6 +79,13 @@
         /* LIVE BLOCKED banner */
         #live-blocked-banner { display:none; background:#f8496022; border:1px solid #f84960; border-radius:8px; padding:10px 16px; margin-bottom:14px; color:#f84960; font-size:17px; font-weight:500; }
         #live-blocked-banner span { font-weight:400; color:#e8a0a8; margin-left:8px; font-size:16px; }
+        #paper-monitor-banner { display:none; background:#1e2430; border:1px solid #3a465c; border-radius:8px; padding:12px 16px; margin-bottom:14px; color:#d9dee6; }
+        #paper-monitor-banner.fail { background:#35191d; border-color:#f84960; color:#ffd5db; }
+        #paper-monitor-banner.pass { background:#0f2b22; border-color:#02c076; color:#d9fff0; }
+        #paper-monitor-title { font-size:17px; font-weight:600; }
+        #paper-monitor-summary, #paper-monitor-detail { margin-top:4px; font-size:15px; color:#b7bdc6; }
+        #paper-monitor-banner.fail #paper-monitor-summary, #paper-monitor-banner.fail #paper-monitor-detail { color:#ffc1cb; }
+        #paper-monitor-banner.pass #paper-monitor-summary, #paper-monitor-banner.pass #paper-monitor-detail { color:#b8f5da; }
 
         .control-row { display:flex; gap:10px; flex-wrap:wrap; margin:0 0 14px; }
         .pause-btn {
@@ -176,6 +183,12 @@
         &#x26A0; ORDERS BLOCKED (SIGNALS STILL RUNNING)<span id="live-blocked-reason"></span>
     </div>
 
+    <div id="paper-monitor-banner">
+        <div id="paper-monitor-title">Paper monitor running</div>
+        <div id="paper-monitor-summary">Waiting for the first 10-minute checkpoint...</div>
+        <div id="paper-monitor-detail"></div>
+    </div>
+
     <div class="page-layout">
 
     <!-- ===== LEFT CONTROL PANEL ===== -->
@@ -218,7 +231,8 @@
     <div class="main-content">
 
     <div class="stats">
-        <div class="card"><h4>Total PnL</h4><div id="pnl-val" class="val" style="color:#02c076">+$0.00</div><div id="app-pnl-sub" class="sub">App PnL: +$0.00</div><div id="binance-pnl-sub" class="sub">Binance PnL: loading...</div></div>
+        <div class="card"><h4>Real PnL (Today)</h4><div id="pnl-val" class="val" style="color:#02c076">+$0.00</div><div id="app-pnl-sub" class="sub">Simulation: +$0.00</div><div id="binance-pnl-sub" class="sub">Binance PnL: loading...</div></div>
+        <div class="card" id="paper-card" style="display:none"><h4>Paper Run</h4><div id="paper-net-val" class="val" style="color:#02c076">+$0.00</div><div id="paper-fees-sub" class="sub">Fees: $0.00 | Gross: $0.00</div><div id="paper-stats-sub" class="sub">Trades: 0 | Win Rate: 0.0% | Open: 0</div></div>
         <div class="card"><h4>Selected Models</h4><div id="active-models" class="val">0</div></div>
         <div class="card"><h4>Mode</h4><div id="mode-val" class="val" style="color:#02c076;font-size:36px">LIVE</div></div>
         <div class="card"><h4>Daily Analytics</h4><div id="daily-summary" class="sub">Loading...</div></div>
@@ -332,6 +346,10 @@
         const pnlEl           = document.getElementById('pnl-val');
         const appPnlSubEl     = document.getElementById('app-pnl-sub');
         const binancePnlSubEl = document.getElementById('binance-pnl-sub');
+        const paperCardEl     = document.getElementById('paper-card');
+        const paperNetValEl   = document.getElementById('paper-net-val');
+        const paperFeesSubEl  = document.getElementById('paper-fees-sub');
+        const paperStatsSubEl = document.getElementById('paper-stats-sub');
         const dailySummaryEl  = document.getElementById('daily-summary');
         const feedLbl         = document.getElementById('feed-label');
         const feedBadge       = document.getElementById('feed-badge');
@@ -348,6 +366,10 @@
         const modeLabelEl     = document.getElementById('mode-label');
         const liveBlockedBanner = document.getElementById('live-blocked-banner');
         const liveBlockedReason = document.getElementById('live-blocked-reason');
+        const paperMonitorBannerEl = document.getElementById('paper-monitor-banner');
+        const paperMonitorTitleEl = document.getElementById('paper-monitor-title');
+        const paperMonitorSummaryEl = document.getElementById('paper-monitor-summary');
+        const paperMonitorDetailEl = document.getElementById('paper-monitor-detail');
         const llmReportBody   = document.getElementById('llm-report-body');
         const autoSelectBtn   = document.getElementById('auto-select-btn');
         const enableGrokBtn   = document.getElementById('enable-grok-btn');
@@ -372,6 +394,7 @@
         const canaryBadgeEl   = document.getElementById('canary-promo-badge');
 
         let state = null;
+        let paperMonitorState = null;
         let lastServerStartedAt = null;
         let btcPrevPrice = null;
         let basketPrevPrice = null;
@@ -566,10 +589,18 @@
                 const appTs = appUpdatedAt || '--:--:--';
                 const appAge = clockAgeSeconds(appTs);
                 const appStale = appAge !== null && appAge > 15 ? ' (stale)' : '';
-                appPnlSubEl.innerText = 'App PnL: ' + formatPnl(Number(appTotalPnl || 0)) + ' | Updated: ' + appTs + appStale;
+                const paperMode = !!(state && state.status && state.status.paper_mode);
+                appPnlSubEl.innerText = (paperMode ? 'Paper Net PnL (incl. fees/slippage): ' : 'Simulation (pre-fee): ')
+                    + formatPnl(Number(appTotalPnl || 0)) + ' | Updated: ' + appTs + appStale;
                 appPnlSubEl.style.color = '#b7bdc6';
             }
             if (!binancePnlSubEl) return;
+            if (state && state.status && state.status.paper_mode) {
+                const updated = (binancePnl && binancePnl.updated_at) ? binancePnl.updated_at : '--:--:--';
+                binancePnlSubEl.innerText = 'Paper mode active: reference Binance metrics only | Updated: ' + updated;
+                binancePnlSubEl.style.color = '#b7bdc6';
+                return;
+            }
             if (!binancePnl || !binancePnl.available) {
                 const err = (binancePnl && binancePnl.error) ? (' (' + binancePnl.error + ')') : '';
                 binancePnlSubEl.innerText = 'Binance PnL: unavailable' + err;
@@ -603,6 +634,81 @@
                     + ' is below executable min ~$' + minExec.toFixed(2)
                     + ', so live signals will be skipped.';
             }
+        }
+
+        function renderPaperCard(s, appLedgerPnl) {
+            const paperMode = !!(s && s.status && s.status.paper_mode);
+            if (!paperCardEl) return;
+            paperCardEl.style.display = paperMode ? 'block' : 'none';
+            if (!paperMode) return;
+
+            const net = Number(appLedgerPnl || 0);
+            const fees = Number((s && s.paper_total_fees_usd) || 0);
+            const gross = net + fees;
+            const ps = (s && s.paper_summary) ? s.paper_summary : {};
+            const trades = Number(ps.trades || 0);
+            const winRate = Number(ps.win_rate_pct || 0);
+            const openPos = Number(ps.open_positions || 0);
+
+            applyPnlText(paperNetValEl, net);
+            if (paperFeesSubEl) {
+                paperFeesSubEl.innerText = 'Fees: ' + formatPnl(-fees) + ' | Gross: ' + formatPnl(gross);
+                paperFeesSubEl.style.color = '#b7bdc6';
+            }
+            if (paperStatsSubEl) {
+                paperStatsSubEl.innerText = 'Trades: ' + trades + ' | Win Rate: ' + winRate.toFixed(1) + '% | Open: ' + openPos;
+                paperStatsSubEl.style.color = '#b7bdc6';
+            }
+        }
+
+        function deskLogMatches(msg, desk) {
+            const ownTag = desk === 'btc' ? '[BTC]' : '[BASKET]';
+            const otherTag = desk === 'btc' ? '[BASKET]' : '[BTC]';
+            const ownDeskText = desk === 'btc' ? 'BTC DESK' : 'BASKET DESK';
+            const otherDeskText = desk === 'btc' ? 'BASKET DESK' : 'BTC DESK';
+            if (msg.includes(ownTag) || msg.includes(ownDeskText)) return true;
+            if (msg.includes(otherTag) || msg.includes(otherDeskText)) return false;
+            return false;
+        }
+
+        function renderPaperMonitorBanner(s, monitor) {
+            if (!paperMonitorBannerEl) return;
+            const paperMode = !!(s && s.status && s.status.paper_mode);
+            const killSwitch = !!(s && s.status && s.status.kill_switch);
+            const haltReason = (s && s.status && s.status.halt_reason) ? s.status.halt_reason : '';
+            const payload = monitor && typeof monitor === 'object' ? monitor : null;
+            const shouldShow = paperMode || killSwitch || (payload && (payload.final || payload.status === 'running' || payload.status === 'halted'));
+            if (!shouldShow) {
+                paperMonitorBannerEl.style.display = 'none';
+                return;
+            }
+
+            const net = Number(payload && payload.net_pnl_usd != null ? payload.net_pnl_usd : (s && s.app_total_pnl_usd) || 0);
+            const fees = Number(payload && payload.fees_usd != null ? payload.fees_usd : (s && s.paper_total_fees_usd) || 0);
+            const trades = Number(payload && payload.trades != null ? payload.trades : ((s && s.paper_summary && s.paper_summary.trades) || 0));
+            const winRate = Number(payload && payload.win_rate_pct != null ? payload.win_rate_pct : ((s && s.paper_summary && s.paper_summary.win_rate_pct) || 0));
+            const elapsed = Number(payload && payload.elapsed_min != null ? payload.elapsed_min : 0);
+            const updatedAt = payload && payload.updated_at ? payload.updated_at.replace('T', ' ') : 'n/a';
+            const verdict = payload && payload.verdict ? payload.verdict : '';
+            const statusText = killSwitch ? 'Paper trading halted' : (payload && payload.final ? 'Paper monitor final report' : 'Paper monitor active');
+            const summaryText = [
+                elapsed > 0 ? ('Elapsed: ' + elapsed + 'm') : null,
+                'Net: ' + formatPnl(net),
+                'Fees: ' + formatPnl(-fees),
+                'Trades: ' + trades,
+                'Win rate: ' + winRate.toFixed(1) + '%',
+            ].filter(Boolean).join(' | ');
+            const detailParts = [];
+            if (haltReason) detailParts.push(haltReason);
+            if (verdict) detailParts.push(verdict);
+            detailParts.push('Updated: ' + updatedAt);
+
+            paperMonitorBannerEl.style.display = 'block';
+            paperMonitorBannerEl.classList.toggle('fail', killSwitch || net < 0 || (verdict && verdict.indexOf('FAIL') === 0));
+            paperMonitorBannerEl.classList.toggle('pass', !killSwitch && net >= 0 && verdict.indexOf('PASS') === 0);
+            if (paperMonitorTitleEl) paperMonitorTitleEl.innerText = statusText;
+            if (paperMonitorSummaryEl) paperMonitorSummaryEl.innerText = summaryText;
+            if (paperMonitorDetailEl) paperMonitorDetailEl.innerText = detailParts.join(' | ');
         }
 
         function renderLlmReport(stats, ollamaModels) {
@@ -804,13 +910,19 @@
 
             // Top stats bar
             if (btcPriceDeskEl)   btcPriceDeskEl.innerText   = '$' + Number(s.prices.btc).toLocaleString(undefined, { maximumFractionDigits: 2 });
-            if (modeEl)           modeEl.innerText           = s.status.mode;
+            const paperMode = !!(s.status && s.status.paper_mode);
+            if (modeEl)           modeEl.innerText           = paperMode ? 'PAPER' : s.status.mode;
 
             // Dynamic page title and header label
-            const isLive = s.status.mode === 'LIVE' && !s.status.live_blocked;
-            const modeWord = isLive ? 'Live Trading' : 'Live Signals (orders blocked)';
+            const isLive = !paperMode && s.status.mode === 'LIVE' && !s.status.live_blocked;
+            const modeWord = paperMode
+                ? 'Paper Trading (no real orders)'
+                : (isLive ? 'Live Trading' : 'Live Signals (orders blocked)');
             document.title = 'QuantPlot AI | ' + modeWord;
-            if (modeLabelEl) { modeLabelEl.innerText = modeWord; modeLabelEl.style.color = isLive ? '#02c076' : '#f0b90b'; }
+            if (modeLabelEl) {
+                modeLabelEl.innerText = modeWord;
+                modeLabelEl.style.color = paperMode ? '#f0b90b' : (isLive ? '#02c076' : '#f0b90b');
+            }
 
             // Desk prices & PnL — use model_stats from server (real fill ledger in live mode)
             const modelStats = s.model_stats || {};
@@ -833,7 +945,11 @@
             const appLedgerPnl = (typeof s.app_total_pnl_usd === 'number')
                 ? Number(s.app_total_pnl_usd)
                 : (btcPnl + basketPnl);
-            const totalPnl = appLedgerPnl;
+            // Use real Binance day net (ex-transfer) as the headline P&L
+            const _bp = s.binance_pnl || {};
+            const realDayNet = (typeof _bp.day_net_income_ex_transfer_usd === 'number')
+                ? Number(_bp.day_net_income_ex_transfer_usd) : null;
+            const totalPnl = paperMode ? appLedgerPnl : (realDayNet !== null ? realDayNet : appLedgerPnl);
 
             // Available pools — show ALL models in BOTH desks.
             // Lock only if selected in the SAME desk (desks are independent).
@@ -880,6 +996,8 @@
 
             applyPnlText(pnlEl, totalPnl);
             renderBinancePnl(appLedgerPnl, s.binance_pnl || null, s.ts || null);
+            renderPaperCard(s, appLedgerPnl);
+            renderPaperMonitorBanner(s, paperMonitorState);
             renderPauseButtons(s);
             renderMessageCenter(s);
             renderDailySummary(s.daily_summary || null);
@@ -887,8 +1005,9 @@
             renderCanary((s.status && s.status.canary) ? s.status.canary : null);
 
             // Logs — filter by desk
-            const btcLogs    = s.logs.filter(l => l.includes('[BTC]')    || !l.includes('[BASKET]'));
-            const basketLogs = s.logs.filter(l => l.includes('[BASKET]') || !l.includes('[BTC]'));
+            const deskLogs = s.desk_logs || {};
+            const btcLogs = Array.isArray(deskLogs.btc) ? deskLogs.btc : [];
+            const basketLogs = Array.isArray(deskLogs.basket) ? deskLogs.basket : [];
             logBtcEl.innerHTML    = btcLogs.map(msg    => '<div>' + msg + '</div>').join('');
             logBasketEl.innerHTML = basketLogs.map(msg => '<div>' + msg + '</div>').join('');
             renderDeskCoinLog(s.live_ledger || {}, 'btc', coinsBtcEl, s.logs || []);
@@ -1135,8 +1254,16 @@
 
         async function refreshState() {
             try {
-                const r = await fetch('/api/state', { cache: 'no-store' });
+                const [r, monitorResp] = await Promise.all([
+                    fetch('/api/state', { cache: 'no-store' }),
+                    fetch('/paper_monitor_status.json?ts=' + Date.now(), { cache: 'no-store' }).catch(() => null),
+                ]);
                 if (!r.ok) return;
+                if (monitorResp && monitorResp.ok) {
+                    paperMonitorState = await monitorResp.json();
+                } else {
+                    paperMonitorState = null;
+                }
                 renderState(await r.json());
             } catch (_) {}
         }

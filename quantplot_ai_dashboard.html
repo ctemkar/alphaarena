@@ -586,6 +586,13 @@
             const otherIncome = Number(binancePnl.income_other_usd || 0);
             const netIncome = Number(binancePnl.net_income_usd || 0);
             const incomeWindowHours = Number(binancePnl.income_window_hours || 0);
+            const dayLabel = String(binancePnl.day_window_label || 'UTC today');
+            const dayNetExTransfer = Number(binancePnl.day_net_income_ex_transfer_usd || 0);
+            const dayFees = Number(binancePnl.day_commission_usd || 0);
+            const dayTransfer = Number(binancePnl.day_transfer_usd || 0);
+            const lifeNetExTransfer = Number(binancePnl.lifetime_net_income_ex_transfer_usd || 0);
+            const lifeFees = Number(binancePnl.lifetime_commission_usd || 0);
+            const lifeUpdated = String(binancePnl.lifetime_updated_at || '--:--:--');
             const wallet = Number(binancePnl.wallet_balance_usd || 0);
             const margin = Number(binancePnl.margin_balance_usd || 0);
             const updated = binancePnl.updated_at || '--:--:--';
@@ -603,6 +610,12 @@
                 + ' | Unrealized: ' + formatPnl(un)
                 + ' | Wallet: ' + formatPnl(wallet)
                 + ' | Margin: ' + formatPnl(margin)
+                + ' | ' + dayLabel + ' Net(ex transfer): ' + formatPnl(dayNetExTransfer)
+                + ' | ' + dayLabel + ' Fees: ' + formatPnl(dayFees)
+                + ' | ' + dayLabel + ' Transfers: ' + formatPnl(dayTransfer)
+                + ' | Lifetime Net(ex transfer): ' + formatPnl(lifeNetExTransfer)
+                + ' | Lifetime Fees: ' + formatPnl(lifeFees)
+                + ' | Lifetime Updated: ' + lifeUpdated
                 + ' | Updated: ' + updated + binStale;
             binancePnlSubEl.style.color = '#b7bdc6';
 
