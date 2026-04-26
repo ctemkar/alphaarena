@@ -1,5 +1,5 @@
 {
-  "ts": "2026-04-26 19:36:52",
+  "ts": "2026-04-26 19:37:52",
   "api_up": true,
   "mode": "safe-paper-monitor",
   "action": "none",
@@ -7,12 +7,12 @@
   "halt_reason": "",
   "paper_mode": true,
   "live_trading": null,
-  "pnl_usd": 0.0,
+  "pnl_usd": -7.083628115942702,
   "paper_summary": {
-    "trades": 0,
+    "trades": 1,
     "wins": 0,
     "losses": 0,
     "win_rate_pct": 0.0
   },
-  "tick": 178
+  "tick": 179
 }
