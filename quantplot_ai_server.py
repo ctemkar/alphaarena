@@ -254,6 +254,21 @@ try:
 except ValueError:
     HOLD_STREAK_MOMENTUM_OVERRIDE_MIN_STREAK = 3
 
+try:
+    DIRECTIONAL_STREAK_CAP = int(os.getenv("ALPHA_DIRECTIONAL_STREAK_CAP", "4"))
+except ValueError:
+    DIRECTIONAL_STREAK_CAP = 4
+try:
+    DIRECTIONAL_STREAK_COOLDOWN_TICKS = int(os.getenv("ALPHA_DIRECTIONAL_STREAK_COOLDOWN_TICKS", "6"))
+except ValueError:
+    DIRECTIONAL_STREAK_COOLDOWN_TICKS = 6
+try:
+    DIRECTIONAL_STREAK_STRONG_MOVE_PCT = float(os.getenv("ALPHA_DIRECTIONAL_STREAK_STRONG_MOVE_PCT", "0.06"))
+except ValueError:
+    DIRECTIONAL_STREAK_STRONG_MOVE_PCT = 0.06
+
+ALWAYS_TRADE_ENABLED = os.getenv("ALPHA_ALWAYS_TRADE_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+
 DISABLE_GROK_AUTO_SELECT = os.getenv("ALPHA_DISABLE_GROK_AUTO_SELECT", "1").strip().lower() in {"1", "true", "yes", "on"}
 BLOCK_CROSS_DESK_SELECT_ON_HOLD = os.getenv("ALPHA_BLOCK_CROSS_DESK_SELECT_ON_HOLD", "1").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -618,6 +633,15 @@ class ArenaState:
         self.one_live_entry_global_per_tick = ONE_LIVE_ENTRY_GLOBAL_PER_TICK
         self.live_duplicate_cooldown_seconds = max(0.0, LIVE_DUPLICATE_COOLDOWN_SECONDS)
         self.live_symbol_cooldown_seconds = max(0.0, LIVE_SYMBOL_COOLDOWN_SECONDS)
+        self.directional_streak_cap = max(2, DIRECTIONAL_STREAK_CAP)
+        self.directional_streak_cooldown_ticks = max(0, DIRECTIONAL_STREAK_COOLDOWN_TICKS)
+        self.directional_streak_strong_move_pct = max(0.0, DIRECTIONAL_STREAK_STRONG_MOVE_PCT)
+        self.always_trade_enabled = ALWAYS_TRADE_ENABLED
+        self.desk_direction_state = {
+            "btc": {"side": "HOLD", "streak": 0, "cooldown_until_tick": 0},
+            "basket": {"side": "HOLD", "streak": 0, "cooldown_until_tick": 0},
+        }
+        self.desk_forced_side = {"btc": "SHORT", "basket": "SHORT"}
         self.last_live_entry_tick_by_desk = {"btc": -1, "basket": -1}
         self.last_live_entry_tick_global = -1
         self.last_live_symbol_side_ts: dict[tuple[str, str], float] = {}
@@ -1972,9 +1996,31 @@ class ArenaState:
                     hard_live_block = self.live_blocked and "Insufficient USDT" not in self.live_blocked_reason
                     if self.live_trading and hard_live_block and side in {"LONG", "SHORT"}:
                         side = "HOLD"
+                    bias_throttle_reason = ""
+                    if side in {"LONG", "SHORT"}:
+                        side, bias_throttle_reason = self._apply_directional_bias_throttle(desk_key, side, move_pct)
+                        if bias_throttle_reason:
+                            self.add_log(
+                                f"{name} [{desk_key.upper()}]: directional signal suppressed ({bias_throttle_reason})"
+                            )
+                    if (
+                        side == "HOLD"
+                        and self.always_trade_enabled
+                        and not self.kill_switch
+                        and not (self.live_trading and hard_live_block)
+                    ):
+                        side = self._always_trade_side(desk_key, move_pct)
+                        self.add_log(
+                            f"{name} [{desk_key.upper()}]: always-trade fallback -> {side} (move {move_pct:+.4f}%)"
+                        )
                     slot["signal_source"] = "ai"
                     slot["last_signal"] = side
                     if side == "HOLD":
+                        desk_state = self.desk_direction_state.get(desk_key)
+                        if desk_state and int(desk_state.get("cooldown_until_tick", 0)) <= self.tick_count:
+                            desk_state["streak"] = max(0, int(desk_state.get("streak", 0)) - 1)
+                            if int(desk_state.get("streak", 0)) == 0:
+                                desk_state["side"] = "HOLD"
                         slot["hold_streak"] = int(slot.get("hold_streak", 0)) + 1
                         if self.hold_cooldown_ticks > 0:
                             slot["hold_cooldown_until_tick"] = max(
@@ -2598,6 +2644,45 @@ class ArenaState:
             base *= self.aggressive_position_multiplier
         return min(max(base, 0.2), 0.85)
 
+    def _apply_directional_bias_throttle(self, desk: str, side: str, move_pct: float) -> tuple[str, str]:
+        if side not in {"LONG", "SHORT"}:
+            return side, ""
+        desk_state = self.desk_direction_state.get(desk)
+        if not desk_state:
+            return side, ""
+        strong_move = abs(move_pct) >= self.directional_streak_strong_move_pct
+        cooldown_until_tick = int(desk_state.get("cooldown_until_tick", 0))
+        if cooldown_until_tick > self.tick_count and not strong_move:
+            return "HOLD", f"directional cooldown until tick {cooldown_until_tick}"
+
+        previous_side = str(desk_state.get("side", "HOLD"))
+        previous_streak = int(desk_state.get("streak", 0))
+        next_streak = (previous_streak + 1) if previous_side == side else 1
+        if next_streak > self.directional_streak_cap and not strong_move:
+            desk_state["side"] = side
+            desk_state["streak"] = next_streak
+            if self.directional_streak_cooldown_ticks > 0:
+                desk_state["cooldown_until_tick"] = max(
+                    cooldown_until_tick,
+                    self.tick_count + self.directional_streak_cooldown_ticks,
+                )
+            return "HOLD", f"directional streak cap {self.directional_streak_cap} ({side} x{next_streak})"
+
+        desk_state["side"] = side
+        desk_state["streak"] = next_streak
+        return side, ""
+
+    def _always_trade_side(self, desk: str, move_pct: float) -> str:
+        if move_pct > 0:
+            side = "LONG"
+        elif move_pct < 0:
+            side = "SHORT"
+        else:
+            last_side = self.desk_forced_side.get(desk, "SHORT")
+            side = "LONG" if last_side == "SHORT" else "SHORT"
+        self.desk_forced_side[desk] = side
+        return side
+
     def _model_score(self, name: str, desk: str) -> float:
         slot = self.models[name]["desk_state"][desk]
         if self.strict_no_simulation and self.live_trading:
@@ -2721,6 +2806,7 @@ class ArenaState:
         # First pass: select models for each desk independently
         desk_selections = {}
         for desk in ("btc", "basket"):
+            other_desk = "basket" if desk == "btc" else "btc"
             forced_rotate: set[str] = set()
             for nm in auto_select_names:
                 slot = self.models[nm]["desk_state"][desk]
@@ -2750,10 +2836,15 @@ class ArenaState:
             ranked_pool = [
                 nm for nm in ranked
                 if nm not in forced_rotate
+                and not self.models[nm]["desk_state"][other_desk].get("selected")
                 and int(self.models[nm]["desk_state"][desk].get("hold_cooldown_until_tick", 0)) <= self.tick_count
             ]
             if not ranked_pool:
-                ranked_pool = [nm for nm in ranked if nm not in forced_rotate]
+                ranked_pool = [
+                    nm for nm in ranked
+                    if nm not in forced_rotate
+                    and not self.models[nm]["desk_state"][other_desk].get("selected")
+                ]
             current_selected = [
                 nm for nm in auto_select_names
                 if self.models[nm]["desk_state"][desk].get("selected")
@@ -3007,7 +3098,9 @@ class ArenaState:
                 self._mark_to_market_slot(name, desk, slot, ref_price)
 
                 # Trade cadence adapts to movement regime (normal vs aggressive).
-                should_trade = slot["selected"] and random.random() < self._signal_chance(desk)
+                should_trade = slot["selected"] and (
+                    self.always_trade_enabled or random.random() < self._signal_chance(desk)
+                )
                 if should_trade:
                     ollama_tag = self._model_provider_map().get(name)
                     if ollama_tag:
@@ -3200,6 +3293,10 @@ class ArenaState:
                     "one_live_entry_global_per_tick": self.one_live_entry_global_per_tick,
                     "live_duplicate_cooldown_seconds": self.live_duplicate_cooldown_seconds,
                     "live_symbol_cooldown_seconds": self.live_symbol_cooldown_seconds,
+                    "directional_streak_cap": self.directional_streak_cap,
+                    "directional_streak_cooldown_ticks": self.directional_streak_cooldown_ticks,
+                    "directional_streak_strong_move_pct": self.directional_streak_strong_move_pct,
+                    "always_trade_enabled": self.always_trade_enabled,
                     "order_queue": self.live_order_queue.qsize(),
                     "auto_select_enabled": self.auto_select_enabled,
                     "auto_select_top_n": self.auto_select_top_n,
@@ -3259,7 +3356,8 @@ class ArenaState:
             self._refresh_binance_pnl_if_due()
             self._refresh_binance_positions_if_due()
             self._evaluate_guardrails()
-            should_bootstrap_selection = self.selected_count("btc") == 0 and self.selected_count("basket") == 0
+            # Backfill auto-selection whenever either desk is empty.
+            should_bootstrap_selection = self.selected_count("btc") == 0 or self.selected_count("basket") == 0
             if self.auto_select_enabled and (
                 should_bootstrap_selection or self.tick_count % self.auto_select_interval_ticks == 0
             ):
