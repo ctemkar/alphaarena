@@ -117,7 +117,9 @@ def auto_repair(data, reasons):
 def summarize_payload(data, signals, elapsed, verdict="", final=False, status="running"):
     app = float(data.get("app_total_pnl_usd", 0) or 0)
     fees = float(data.get("paper_total_fees_usd", 0) or 0)
-    summary = data.get("paper_summary") or {}
+    # paper_summary is added by the updated server; fall back to daily_summary for
+    # compatibility with older server builds that only expose daily_summary.
+    summary = data.get("paper_summary") or data.get("daily_summary") or {}
     state = data.get("status") or {}
     halt_reason = (state.get("halt_reason") or "").strip()
     kill_switch = bool(state.get("kill_switch"))

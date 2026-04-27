@@ -218,10 +218,12 @@ def _ollama_signal(
             trend_lines.append(f"Last tick change: {tick_chg:+.4f}%.")
 
     context = " ".join(trend_lines)
+    tech_context = _build_technical_context(list(price_history) if price_history else [], key)
     prompt = (
-        f"You are a short-term crypto trader. {asset} current price: ${price:,.2f}. "
+        f"You are a professional short-term crypto futures trader. {asset} current price: ${price:,.2f}. "
         + (context + " " if context else "")
-        + "Based on this price action, should a short-term trader go LONG, SHORT, or HOLD? "
+        + (tech_context + " " if tech_context else "")
+        + "Based on this market data, should a short-term futures trader go LONG, SHORT, or HOLD? "
         "Reply with exactly one word: LONG, SHORT, or HOLD."
     )
     payload = json.dumps({"model": ollama_tag, "prompt": prompt, "stream": False}).encode()
@@ -246,6 +248,68 @@ def _ollama_signal(
         return 0, "timeout"
     except Exception as exc:
         return 0, str(exc)[:80]
+
+
+def _build_technical_context(price_history: list[dict], key: str) -> str:
+    """Compute EMA crossover, RSI-like momentum, volatility, and range context for LLM prompts.
+
+    Args:
+        price_history: list of price dicts from ArenaState.price_history (newest last).
+        key: "btc" or "basket" – the price series to analyse.
+    Returns:
+        A concise multi-sentence string ready to embed in an LLM trading prompt, or "" if
+        insufficient history is available.
+    """
+    prices = [float(h[key]) for h in price_history if isinstance(h, dict) and key in h and float(h.get(key, 0) or 0) > 0]
+    if len(prices) < 4:
+        return ""
+
+    # EMA helper (seed with simple average over first `period` bars)
+    def _ema(data: list[float], period: int) -> float:
+        p = min(period, len(data))
+        val = sum(data[:p]) / p
+        k = 2.0 / (p + 1)
+        for px in data[p:]:
+            val = px * k + val * (1.0 - k)
+        return val
+
+    ema8 = _ema(prices, 8)
+    ema20 = _ema(prices, 20)
+    ema_diff_pct = (ema8 - ema20) / ema20 * 100.0 if ema20 else 0.0
+    ema_label = "bullish" if ema8 > ema20 else ("bearish" if ema8 < ema20 else "neutral")
+
+    # Tick returns (%)
+    returns = [(prices[i] - prices[i - 1]) / prices[i - 1] * 100.0
+               for i in range(1, len(prices)) if prices[i - 1] > 0]
+    n_ret = len(returns)
+    if n_ret == 0:
+        return ""
+
+    # Volatility: std dev of per-tick returns
+    mean_r = sum(returns) / n_ret
+    variance = sum((r - mean_r) ** 2 for r in returns) / n_ret
+    vol = math.sqrt(variance)
+    vol_label = "low" if vol < 0.05 else ("high" if vol > 0.20 else "moderate")
+
+    # RSI-like momentum (0–100 scale based on avg gain vs avg loss)
+    avg_gain = sum(r for r in returns if r > 0) / n_ret
+    avg_loss = sum(abs(r) for r in returns if r < 0) / n_ret
+    momentum_score = int(100.0 * avg_gain / (avg_gain + avg_loss)) if (avg_gain + avg_loss) > 0 else 50
+    momentum_label = "overbought" if momentum_score > 70 else ("oversold" if momentum_score < 30 else "neutral")
+
+    # Recent high / low (last 10 bars)
+    recent = prices[-min(10, len(prices)):]
+    r_high = max(recent)
+    r_low = min(recent)
+    current = prices[-1]
+    in_range_pct = int((current - r_low) / (r_high - r_low) * 100) if r_high > r_low else 50
+
+    return (
+        f"EMA8 {'above' if ema8 >= ema20 else 'below'} EMA20 by {abs(ema_diff_pct):.3f}% ({ema_label} crossover). "
+        f"Volatility: {vol_label} ({vol:.3f}%/tick). "
+        f"Momentum (RSI-like): {momentum_score}/100 ({momentum_label}). "
+        f"Recent range: high ${r_high:,.2f} low ${r_low:,.2f}; price at {in_range_pct}% of range."
+    )
 
 
 def now_ts() -> str:
@@ -298,10 +362,12 @@ class ArenaState:
             "bnb": 630.0,
             "basket": 0.0,
         }
-        # Rolling price history: last 20 ticks (~1 min at 3s/tick)
-        self.price_history: collections.deque[dict] = collections.deque(maxlen=20)
+        # Rolling price history: last 40 ticks (~2 min at 3s/tick) for richer LLM context
+        self.price_history: collections.deque[dict] = collections.deque(maxlen=40)
         self.live_feed = False
         self.live_trading = bool(LIVE_TRADING_ENABLED and BINANCE_API_KEY and BINANCE_API_SECRET)
+        # paper_mode=True disables live order routing (default: True unless live credentials active)
+        self.paper_mode = not self.live_trading
         self.live_order_usd = max(5.0, min(LIVE_ORDER_USD, MAX_ORDER_USD, HARD_MAX_ORDER_USD))
         self.max_order_usd = max(5.0, min(MAX_ORDER_USD, HARD_MAX_ORDER_USD))
         self.daily_loss_limit_usd = max(10.0, DAILY_LOSS_LIMIT_USD)
@@ -885,14 +951,15 @@ class ArenaState:
                         self.add_log(f"{name} [{desk_key.upper()}]: LLM error — {err} (using momentum fallback)")
                     # Momentum-based fallback for errors: use recent price movement to avoid HOLD
                     move_pct = self._desk_recent_move_pct(desk_key)
-                    if abs(move_pct) >= 0.01:
+                    if abs(move_pct) >= 0.05:  # ≥0.05% threshold filters out spread noise
                         action = 1 if move_pct > 0 else -1
                     else:
                         action = 0  # Still HOLD if no clear momentum
-                # If AI is neutral (action == 0), use tiny momentum as a directional tiebreaker
+                # If AI is neutral (action == 0), use momentum as a directional tiebreaker
+                # Threshold of 0.05% (~$42 on BTC) filters spread noise vs genuine moves
                 elif action == 0:
                     move_pct = self._desk_recent_move_pct(desk_key)
-                    if abs(move_pct) >= 0.01:
+                    if abs(move_pct) >= 0.05:
                         action = 1 if move_pct > 0 else -1
                 
                 live_desk = desk_key
@@ -1297,7 +1364,16 @@ class ArenaState:
         total_signals = hold_signals + directional_signals
         hold_ratio = (hold_signals / total_signals) if total_signals else 0.5
         hold_penalty = (hold_ratio * self.hold_score_penalty) + (min(hold_streak, 10) * 0.5)
-        return pnl + ((win_rate - 0.5) * 20.0) + (expectancy * 0.25) + continuity - hold_penalty
+
+        # Confidence scaling: reduce the weight of PnL for models with very few trades to
+        # prevent a single lucky trade from dominating model selection.  Full weight is
+        # reached after 5 completed trades.
+        confidence = min(trades / 5.0, 1.0)
+        risk_adj_pnl = pnl * (0.4 + 0.6 * confidence)
+
+        # Expectancy weight raised from 0.25 → 0.5: it measures per-trade edge quality
+        # which is more stable than raw PnL with a small sample.
+        return risk_adj_pnl + ((win_rate - 0.5) * 20.0) + (expectancy * 0.5) + continuity - hold_penalty
 
     def _select_model_unlocked(self, name: str, desk: str = "btc") -> bool:
         m = self.models.get(name)
@@ -1711,6 +1787,7 @@ class ArenaState:
                         "LIVE_BLOCKED" if (self.live_trading and self.live_blocked)
                         else ("LIVE" if self.live_trading else "LIVE_BLOCKED")
                     ),
+                    "paper_mode": self.paper_mode,
                     "no_simulation": self.strict_no_simulation,
                     "require_live_feed": self.require_live_feed,
                     "feed_paused": self.feed_paused,
@@ -1760,6 +1837,22 @@ class ArenaState:
                 "model_stats": model_stats,
                 "start_balance": START_BALANCE,
                 "daily_summary": self._get_daily_summary(),
+                # paper_summary: alias for daily_summary with open_positions count added.
+                # Required by paper monitor (_pm.py / _pm_safe.py) for compatibility.
+                "paper_summary": {
+                    **self._get_daily_summary(),
+                    "open_positions": sum(
+                        1
+                        for m in self.models.values()
+                        for dk in ("btc", "basket")
+                        if m["desk_state"][dk].get("selected")
+                        and m["desk_state"][dk].get("trade_side") in {"LONG", "SHORT"}
+                    ),
+                },
+                # Fees are already deducted from trade_pnl in our accounting so net_pnl is
+                # already net-of-fees.  We surface 0.0 here so monitors that display
+                # gross_pnl = net_pnl + fees_usd still render correctly.
+                "paper_total_fees_usd": 0.0,
                 "binance_pnl": self.binance_pnl,
                 "server_started_at": self.server_started_at,
                 "logs": self.logs[:],
@@ -1818,6 +1911,7 @@ class ArenaHandler(SimpleHTTPRequestHandler):
             "/api/auto-select",
             "/api/desks/clear",
             "/api/away-mode",
+            "/api/paper-mode",
             "/api/message/pnl-health",
             "/api/message/recent-summary",
         }:
@@ -1892,6 +1986,27 @@ class ArenaHandler(SimpleHTTPRequestHandler):
         if self.path == "/api/message/recent-summary":
             msg = self.state.push_recent_summary_message()
             self._json(200, {"ok": True, "message": msg})
+            return
+
+        if self.path == "/api/paper-mode":
+            enabled_raw = data.get("enabled")
+            if not isinstance(enabled_raw, bool):
+                self._json(400, {"ok": False, "error": "enabled must be boolean"})
+                return
+            with self.state.lock:
+                self.state.paper_mode = bool(enabled_raw)
+                if enabled_raw:
+                    # Forcing paper mode ON: disable live order routing immediately.
+                    self.state.live_trading = False
+                    self.state.add_log("PAPER MODE ON: live order routing disabled via /api/paper-mode")
+                else:
+                    # Turning paper mode OFF: restore live trading only if credentials exist.
+                    self.state.live_trading = bool(
+                        LIVE_TRADING_ENABLED and BINANCE_API_KEY and BINANCE_API_SECRET
+                    )
+                    live_state = "ON" if self.state.live_trading else "OFF (credentials missing)"
+                    self.state.add_log(f"PAPER MODE OFF: live_trading={live_state}")
+            self._json(200, {"ok": True, "changed": True, "paper_mode": bool(enabled_raw)})
             return
 
         model = data.get("model", "")

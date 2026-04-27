@@ -92,11 +92,25 @@ class ExecutionCore:
 
     @staticmethod
     def _apply_remaining_budget(allocations: dict[str, float], extra_budget: float, max_order_usd: float) -> None:
+        """Distribute extra_budget across symbols that have headroom below max_order_usd.
+
+        Iterates up to 5 rounds so that budget freed from capped symbols is correctly
+        redistributed to uncapped ones rather than being silently discarded.
+        """
         if not allocations or extra_budget <= 0.0:
             return
-        per_symbol_extra = extra_budget / len(allocations)
-        for symbol in list(allocations.keys()):
-            allocations[symbol] = min(allocations[symbol] + per_symbol_extra, max_order_usd)
+        for _ in range(5):
+            uncapped = [s for s in allocations if allocations[s] < max_order_usd - 1e-9]
+            if not uncapped or extra_budget < 0.01:
+                break
+            per_symbol_extra = extra_budget / len(uncapped)
+            redistributed = 0.0
+            for symbol in uncapped:
+                headroom = max_order_usd - allocations[symbol]
+                added = min(per_symbol_extra, headroom)
+                allocations[symbol] += added
+                redistributed += added
+            extra_budget -= redistributed
 
     def set_mode(self, mode: str) -> tuple[bool, str]:
         if mode not in self.VALID_MODES:
@@ -421,6 +435,64 @@ class ExecutionCore:
             "skipped": skipped,
         }
         return FlattenPlan(orders=orders, skipped=skipped)
+
+    @staticmethod
+    def compute_trade_metrics(trade_pnls: list[float]) -> dict:
+        """Compute risk-adjusted performance metrics from a list of closed-trade PnL values.
+
+        Returns a dict with: count, total_pnl, win_rate, expectancy, max_drawdown,
+        sharpe (mean/std of trade returns), sortino (mean/downside-std).
+        All values are safe to compute even on an empty list.
+        """
+        n = len(trade_pnls)
+        if n == 0:
+            return {
+                "count": 0,
+                "total_pnl": 0.0,
+                "win_rate": 0.0,
+                "expectancy": 0.0,
+                "max_drawdown": 0.0,
+                "sharpe": 0.0,
+                "sortino": 0.0,
+            }
+
+        wins = sum(1 for p in trade_pnls if p > 0)
+        total = sum(trade_pnls)
+        expectancy = total / n
+        win_rate = wins / n
+
+        # Max drawdown on cumulative equity curve
+        equity = 0.0
+        peak = 0.0
+        max_dd = 0.0
+        for p in trade_pnls:
+            equity += p
+            if equity > peak:
+                peak = equity
+            dd = peak - equity
+            if dd > max_dd:
+                max_dd = dd
+
+        # Sharpe: mean / std (trade-level, not annualised)
+        mean = expectancy
+        variance = sum((p - mean) ** 2 for p in trade_pnls) / n
+        std = variance ** 0.5
+        sharpe = mean / std if std > 1e-12 else 0.0
+
+        # Sortino: mean / downside-std
+        downside_var = sum((p - mean) ** 2 for p in trade_pnls if p < mean) / n
+        downside_std = downside_var ** 0.5
+        sortino = mean / downside_std if downside_std > 1e-12 else 0.0
+
+        return {
+            "count": n,
+            "total_pnl": round(total, 6),
+            "win_rate": round(win_rate, 4),
+            "expectancy": round(expectancy, 6),
+            "max_drawdown": round(max_dd, 6),
+            "sharpe": round(sharpe, 4),
+            "sortino": round(sortino, 4),
+        }
 
     def _deny(self, reason: str) -> OrderPlan:
         return OrderPlan(
