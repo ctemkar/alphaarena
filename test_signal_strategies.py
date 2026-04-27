@@ -18,7 +18,7 @@ from datetime import datetime
 
 # Test configuration
 STRATEGIES = ["trend_filter", "simple_prompt", "reversal"]
-TEST_DURATION_SECONDS = 180  # 3 minutes per strategy
+TEST_DURATION_SECONDS = 120  # 2 minutes per strategy
 CHECK_INTERVAL_SECONDS = 5
 STATE_URL = "http://127.0.0.1:8000/api/state"
 WORKSPACE = Path("/Users/chetantemkar/development/alphaarena")
@@ -46,8 +46,12 @@ def start_server(strategy):
     env["ALPHA_LIVE_TRADING"] = "0"
     env["ALPHA_PAPER_MODE"] = "1"
     env["ALPHA_AUTO_SELECT_ENABLED"] = "0"
-    env["ALPHA_MIN_PROFIT_EDGE_PCT"] = "0.02"
-    env["ALPHA_MIN_TRADE_MOVE_PCT"] = "0.01"
+    env["ALPHA_BASE_SIGNAL_CHANCE"] = "1.0"
+    env["ALPHA_MIN_PROFIT_EDGE_PCT"] = "0.0"
+    env["ALPHA_MIN_TRADE_MOVE_PCT"] = "0.0"
+    env["ALPHA_MOMENTUM_OVERRIDE_THRESHOLD_PCT"] = "0.005"
+    env["ALPHA_HOLD_STREAK_MOMENTUM_OVERRIDE_ENABLED"] = "1"
+    env["ALPHA_HOLD_STREAK_MOMENTUM_OVERRIDE_MIN_STREAK"] = "1"
     
     # Reset paper mode state before starting
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Resetting paper mode to clear ledger...")
