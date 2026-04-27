@@ -268,8 +268,12 @@ def main():
     
     sorted_results = sorted(
         [(k, v) for k, v in results.items() if v is not None],
-        key=lambda x: x[1].get("win_rate_pct", 0),
-        reverse=True
+        key=lambda x: (
+            x[1].get("win_rate_pct", 0.0),
+            x[1].get("expectancy_usd", -1e9),
+            x[1].get("total_pnl_usd", -1e9),
+        ),
+        reverse=True,
     )
     
     for rank, (strategy, stats) in enumerate(sorted_results, 1):

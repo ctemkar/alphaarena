@@ -282,12 +282,17 @@ except ValueError:
 # Strategy selection for signal filtering:
 # 'trend_filter' (default) = Strict trend filtering (rejects counter-trend signals)
 # 'simple_prompt' = Simplified prompt (basic momentum only, no complex context)
-# 'reversal' = Inverts all LLM signals (LONG→SHORT, SHORT→LONG)
+# 'reversal' = Inverts all LLM signals (LONG->SHORT, SHORT->LONG)
+# 'selective_reverse' = Invert only when the AI conflicts with strong momentum
 SIGNAL_STRATEGY = os.getenv("ALPHA_SIGNAL_STRATEGY", "trend_filter").strip().lower()
 try:
     STRICT_TREND_FILTER_PCT = float(os.getenv("ALPHA_STRICT_TREND_FILTER_PCT", "0.05"))
 except ValueError:
     STRICT_TREND_FILTER_PCT = 0.05
+try:
+    SELECTIVE_REVERSE_MIN_MOVE_PCT = float(os.getenv("ALPHA_SELECTIVE_REVERSE_MIN_MOVE_PCT", "0.02"))
+except ValueError:
+    SELECTIVE_REVERSE_MIN_MOVE_PCT = 0.02
 
 ALWAYS_TRADE_ENABLED = os.getenv("ALPHA_ALWAYS_TRADE_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -747,6 +752,10 @@ class ArenaState:
             f"STARTUP: Signal strategy = {SIGNAL_STRATEGY.upper()} "
             f"(trend_threshold={STRICT_TREND_FILTER_PCT:.3f}% if trend_filter)"
         )
+        if SIGNAL_STRATEGY == "selective_reverse":
+            self.add_log(
+                f"STARTUP: Selective reverse enabled (min_move={SELECTIVE_REVERSE_MIN_MOVE_PCT:.3f}%)"
+            )
 
     @staticmethod
     def _default_daily_summary(day: str) -> dict:

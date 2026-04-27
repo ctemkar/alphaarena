@@ -1,29 +1,83 @@
 {
   "trend_filter": {
-    "trades": 273,
-    "wins": 2,
-    "losses": 271,
-    "win_rate_pct": 0.73,
-    "total_pnl_usd": -1041.9061,
-    "max_drawdown_usd": 1041.9061,
-    "expectancy_usd": -3.8165
+    "trades": 4,
+    "wins": 0,
+    "losses": 4,
+    "win_rate_pct": 0.0,
+    "total_pnl_usd": -17.4808,
+    "expectancy_usd": -4.3702,
+    "max_drawdown_usd": 1132.8107,
+    "initial_snapshot": {
+      "trades": 289,
+      "wins": 2,
+      "losses": 287,
+      "win_rate_pct": 0.69,
+      "total_pnl_usd": -1115.3299,
+      "max_drawdown_usd": 1115.3299,
+      "expectancy_usd": -3.8593
+    },
+    "final_snapshot": {
+      "trades": 293,
+      "wins": 2,
+      "losses": 291,
+      "win_rate_pct": 0.68,
+      "total_pnl_usd": -1132.8107,
+      "max_drawdown_usd": 1132.8107,
+      "expectancy_usd": -3.8662
+    }
   },
   "simple_prompt": {
-    "trades": 280,
-    "wins": 2,
-    "losses": 278,
-    "win_rate_pct": 0.71,
-    "total_pnl_usd": -1075.5819,
-    "max_drawdown_usd": 1075.5819,
-    "expectancy_usd": -3.8414
+    "trades": 2,
+    "wins": 0,
+    "losses": 2,
+    "win_rate_pct": 0.0,
+    "total_pnl_usd": -5.257,
+    "expectancy_usd": -2.6285,
+    "max_drawdown_usd": 1138.0677,
+    "initial_snapshot": {
+      "trades": 293,
+      "wins": 2,
+      "losses": 291,
+      "win_rate_pct": 0.68,
+      "total_pnl_usd": -1132.8107,
+      "max_drawdown_usd": 1132.8107,
+      "expectancy_usd": -3.8662
+    },
+    "final_snapshot": {
+      "trades": 295,
+      "wins": 2,
+      "losses": 293,
+      "win_rate_pct": 0.68,
+      "total_pnl_usd": -1138.0677,
+      "max_drawdown_usd": 1138.0677,
+      "expectancy_usd": -3.8579
+    }
   },
   "reversal": {
-    "trades": 287,
-    "wins": 2,
-    "losses": 285,
-    "win_rate_pct": 0.7,
-    "total_pnl_usd": -1106.4971,
-    "max_drawdown_usd": 1106.4971,
-    "expectancy_usd": -3.8554
+    "trades": 3,
+    "wins": 0,
+    "losses": 3,
+    "win_rate_pct": 0.0,
+    "total_pnl_usd": -13.3313,
+    "expectancy_usd": -4.4438,
+    "max_drawdown_usd": 1151.399,
+    "initial_snapshot": {
+      "trades": 295,
+      "wins": 2,
+      "losses": 293,
+      "win_rate_pct": 0.68,
+      "total_pnl_usd": -1138.0677,
+      "max_drawdown_usd": 1138.0677,
+      "expectancy_usd": -3.8579
+    },
+    "final_snapshot": {
+      "trades": 298,
+      "wins": 2,
+      "losses": 296,
+      "win_rate_pct": 0.67,
+      "total_pnl_usd": -1151.399,
+      "max_drawdown_usd": 1151.399,
+      "expectancy_usd": -3.8638
+    }
   }
 }
