@@ -3281,7 +3281,7 @@ class ArenaState:
                 self.add_log(f"LIVE FEED LOST: trading paused | cause: {self.feed_error}")
 
         self.recalc_basket()
-    self._score_pending_raw_signals_unlocked()
+        self._score_pending_raw_signals_unlocked()
         # Save to rolling price history (used to enrich LLM prompts)
         self.price_history.append({
             "btc":    self.prices["btc"],
