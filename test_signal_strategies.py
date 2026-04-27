@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Test script to evaluate three signal generation strategies:
-1. trend_filter - Strict trend filtering (0.05% threshold)
+Test script to evaluate signal generation strategies:
+1. trend_filter - Strict trend filtering (reject counter-trend signals)
 2. simple_prompt - Simplified LLM prompt
-3. reversal - Inverts all LLM signals
+3. reversal - Invert all LLM signals
+4. selective_reverse - Invert only clear counter-trend signals
 """
 import os
 import sys
@@ -17,7 +18,7 @@ from pathlib import Path
 from datetime import datetime
 
 # Test configuration
-STRATEGIES = ["trend_filter", "simple_prompt", "reversal"]
+STRATEGIES = ["trend_filter", "simple_prompt", "reversal", "selective_reverse"]
 TEST_DURATION_SECONDS = 120  # 2 minutes per strategy
 CHECK_INTERVAL_SECONDS = 5
 STATE_URL = "http://127.0.0.1:8000/api/state"
@@ -52,6 +53,7 @@ def start_server(strategy):
     env["ALPHA_MOMENTUM_OVERRIDE_THRESHOLD_PCT"] = "0.005"
     env["ALPHA_HOLD_STREAK_MOMENTUM_OVERRIDE_ENABLED"] = "1"
     env["ALPHA_HOLD_STREAK_MOMENTUM_OVERRIDE_MIN_STREAK"] = "1"
+    env["ALPHA_SELECTIVE_REVERSE_MIN_MOVE_PCT"] = "0.02"
     
     # Reset paper mode state before starting
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Resetting paper mode to clear ledger...")
@@ -236,7 +238,7 @@ def run_test_for_strategy(strategy):
         time.sleep(2)  # Cool down between tests
 
 def main():
-    """Run all three tests sequentially"""
+    """Run all configured tests sequentially"""
     print(f"\n{'='*70}")
     print(f"ALPHA ARENA SIGNAL STRATEGY COMPARISON TEST")
     print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

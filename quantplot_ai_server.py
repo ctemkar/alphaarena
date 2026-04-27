@@ -3169,11 +3169,13 @@ class ArenaState:
         if err:
             self.add_log(f"{name} [{desk_key.upper()}]: LLM error — {err} (treated as HOLD)")
             action = 0
-        
+
+        selective_reverse_used = False
+
         # Apply reversal strategy if configured
         if SIGNAL_STRATEGY == "reversal":
             action = -action  # Invert signal: LONG->SHORT, SHORT->LONG, HOLD->HOLD
-        
+
         move_pct = self._desk_recent_move_pct(desk_key)
         entry_move_threshold = max(MIN_TRADE_MOVE_PCT, MIN_PROFIT_EDGE_PCT)
         momentum_threshold = max(MOMENTUM_OVERRIDE_THRESHOLD_PCT, entry_move_threshold)
@@ -3181,13 +3183,28 @@ class ArenaState:
         if action != 0:
             if abs(move_pct) < entry_move_threshold:
                 action = 0
-        
+
+        selective_reverse_threshold = max(
+            SELECTIVE_REVERSE_MIN_MOVE_PCT,
+            MOMENTUM_OVERRIDE_THRESHOLD_PCT,
+            entry_move_threshold,
+        )
+        if SIGNAL_STRATEGY == "selective_reverse" and action != 0:
+            if action == 1 and move_pct <= -selective_reverse_threshold:
+                action = -1
+                selective_reverse_used = True
+            elif action == -1 and move_pct >= selective_reverse_threshold:
+                action = 1
+                selective_reverse_used = True
+
         # Apply trend filtering based on strategy
         if SIGNAL_STRATEGY == "trend_filter":
             trend_threshold = STRICT_TREND_FILTER_PCT
+        elif SIGNAL_STRATEGY == "selective_reverse":
+            trend_threshold = selective_reverse_threshold
         else:
             trend_threshold = MOMENTUM_OVERRIDE_THRESHOLD_PCT
-        
+
         # Guardrail: suppress entries that directly oppose current desk momentum direction.
         if action == 1 and move_pct <= -trend_threshold:
             action = 0
@@ -3254,6 +3271,10 @@ class ArenaState:
             if hold_override_used and side in {"LONG", "SHORT"}:
                 self.add_log(
                     f"{name} [{desk}]: HOLD override -> {side} (hold_streak={int(slot.get('hold_streak', 0))}, move={move_pct:+.4f}%)"
+                )
+            if selective_reverse_used and side in {"LONG", "SHORT"}:
+                self.add_log(
+                    f"{name} [{desk}]: selective reverse -> {side} (move={move_pct:+.4f}%)"
                 )
             _log_movement({
                 "type":   "signal",
