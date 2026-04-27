@@ -19,7 +19,7 @@ MODELS = {
     "btc": "Qwen-2.5",
     "basket": "DeepSeek-R1",
 }
-DURATION_SECONDS = 60
+DURATION_SECONDS = 20
 CHECK_SECONDS = 10
 
 
