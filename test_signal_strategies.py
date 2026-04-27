@@ -167,16 +167,20 @@ def get_run_stats():
             
             data = json.loads(resp.read().decode())
             paper = data.get("paper_summary") or {}
+            net_pnl = float(data.get("app_total_pnl_usd", 0.0) or 0.0)
+            ex_fees_pnl = float(data.get("app_total_pnl_excl_fees_usd", net_pnl) or net_pnl)
             
             return {
                 "trades": int(paper.get("trades", 0)),
                 "wins": int(paper.get("wins", 0)),
                 "losses": int(paper.get("losses", 0)),
                 "win_rate_pct": float(paper.get("win_rate_pct", 0.0)),
-                "total_pnl_usd": float(data.get("app_total_pnl_usd", 0.0)),
-                "max_drawdown_usd": abs(float(data.get("app_total_pnl_usd", 0.0))),
+                "total_pnl_usd": net_pnl,
+                "total_pnl_excl_fees_usd": ex_fees_pnl,
+                "fee_drag_usd": ex_fees_pnl - net_pnl,
+                "max_drawdown_usd": abs(net_pnl),
                 "expectancy_usd": (
-                    float(data.get("app_total_pnl_usd", 0.0)) / max(1, int(paper.get("trades", 0)))
+                    net_pnl / max(1, int(paper.get("trades", 0)))
                     if int(paper.get("trades", 0)) > 0
                     else 0.0
                 ),
@@ -228,7 +232,9 @@ def run_test_for_strategy(strategy):
                         f"RunTrades: {stats['trades']} | "
                         f"RunWins: {stats['wins']} | "
                         f"RunWin%: {stats['win_rate_pct']:.2f}% | "
-                        f"RunPnL: ${stats['total_pnl_usd']:+.2f}"
+                        f"RunPnL: ${stats['total_pnl_usd']:+.2f} | "
+                        f"ExFees: ${stats.get('total_pnl_excl_fees_usd', stats['total_pnl_usd']):+.2f} | "
+                        f"CostDrag: ${stats.get('fee_drag_usd', 0.0):+.2f}"
                     )
                 last_check = now
             
@@ -245,6 +251,8 @@ def run_test_for_strategy(strategy):
             "losses": int(final_stats.get("losses", 0)),
             "win_rate_pct": round(float(final_stats.get("win_rate_pct", 0.0)), 2),
             "total_pnl_usd": round(float(final_stats.get("total_pnl_usd", 0.0)), 4),
+            "total_pnl_excl_fees_usd": round(float(final_stats.get("total_pnl_excl_fees_usd", final_stats.get("total_pnl_usd", 0.0))), 4),
+            "fee_drag_usd": round(float(final_stats.get("fee_drag_usd", 0.0)), 4),
             "expectancy_usd": round(float(final_stats.get("expectancy_usd", 0.0)), 4),
             "max_drawdown_usd": float(final_stats.get("max_drawdown_usd", 0.0)),
             "initial_snapshot": initial_stats or {},
@@ -280,6 +288,8 @@ def main():
             print(f"  Wins: {stats['wins']}")
             print(f"  Win Rate: {stats['win_rate_pct']:.2f}%")
             print(f"  Total PnL: ${stats['total_pnl_usd']:+.2f}")
+            print(f"  Ex-Fee PnL: ${stats.get('total_pnl_excl_fees_usd', stats['total_pnl_usd']):+.2f}")
+            print(f"  Fee Drag: ${stats.get('fee_drag_usd', 0.0):+.2f}")
             print(f"  Expectancy: ${stats['expectancy_usd']:+.2f}")
             print(f"  Max Drawdown: ${stats['max_drawdown_usd']:.2f}")
         else:

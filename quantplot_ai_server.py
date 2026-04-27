@@ -1552,6 +1552,7 @@ class ArenaState:
             self.paper_ledger[key] = {
                 "realized_pnl": 0.0, "open_qty": 0.0, "avg_entry": 0.0,
                 "wins": 0, "losses": 0, "trades": 0,
+                "fees_slippage_paid": 0.0,
             }
         L = self.paper_ledger[key]
         is_long = (side_label == "LONG")
@@ -1563,6 +1564,7 @@ class ArenaState:
         cost_rate = (ANALYTICS_FEE_BPS + ANALYTICS_SLIPPAGE_BPS) / 10000.0
         fill_cost = (fill_qty * avg_price) * cost_rate
         L["realized_pnl"] -= fill_cost
+        L["fees_slippage_paid"] = float(L.get("fees_slippage_paid", 0.0) or 0.0) + fill_cost
         self.paper_total_fees_usd += fill_cost
 
         if abs(open_qty) < 1e-12:
@@ -1642,16 +1644,34 @@ class ArenaState:
         """Sum realized + unrealized P&L across all models for a desk. Under self.lock."""
         return sum(self._ledger_model_desk_pnl(nm, desk, ledger=ledger) for nm in self.models)
 
+    def _ledger_desk_total_fees(
+        self,
+        desk: str,
+        ledger: dict[tuple[str, str, str], dict] | None = None,
+    ) -> float:
+        """Sum paid fee+slippage across all models for a desk. Under self.lock."""
+        source = ledger if ledger is not None else (self.paper_ledger if self.paper_mode else self.live_ledger)
+        total = 0.0
+        for (_, entry_desk, symbol), entry in source.items():
+            if entry_desk != desk:
+                continue
+            if symbol not in self._desk_symbols(desk):
+                continue
+            total += float(entry.get("fees_slippage_paid", 0.0) or 0.0)
+        return total
+
     @staticmethod
     def _ledger_summary(ledger: dict[tuple[str, str, str], dict]) -> dict:
         trades = 0
         wins = 0
         losses = 0
         open_positions = 0
+        fees_paid_usd = 0.0
         for entry in ledger.values():
             trades += int(entry.get("trades", 0) or 0)
             wins += int(entry.get("wins", 0) or 0)
             losses += int(entry.get("losses", 0) or 0)
+            fees_paid_usd += float(entry.get("fees_slippage_paid", 0.0) or 0.0)
             if abs(float(entry.get("open_qty", 0.0) or 0.0)) > 1e-12:
                 open_positions += 1
         decided = wins + losses
@@ -1662,6 +1682,7 @@ class ArenaState:
             "losses": losses,
             "open_positions": open_positions,
             "win_rate_pct": round(win_rate_pct, 2),
+            "fees_paid_usd": round(fees_paid_usd, 6),
         }
 
     def _refresh_binance_positions_if_due(self) -> None:
@@ -3357,6 +3378,8 @@ class ArenaState:
                 # Strict mode P&L from active execution ledger (paper or live).
                 btc_pnl = self._ledger_desk_total_pnl("btc", ledger=active_ledger)
                 basket_pnl = self._ledger_desk_total_pnl("basket", ledger=active_ledger)
+                btc_fees = self._ledger_desk_total_fees("btc", ledger=active_ledger)
+                basket_fees = self._ledger_desk_total_fees("basket", ledger=active_ledger)
                 app_total_pnl = btc_pnl + basket_pnl
                 # Equity balances are not meaningful in strict live mode; use 0
                 btc_equity = 0.0
@@ -3377,6 +3400,17 @@ class ArenaState:
                     if m["desk_state"]["basket"]["selected"]
                 )
                 app_total_pnl = btc_pnl + basket_pnl
+                if self.paper_mode:
+                    btc_fees = self._ledger_desk_total_fees("btc", ledger=self.paper_ledger)
+                    basket_fees = self._ledger_desk_total_fees("basket", ledger=self.paper_ledger)
+                else:
+                    btc_fees = 0.0
+                    basket_fees = 0.0
+            app_total_fees = btc_fees + basket_fees
+            desk_pnl_excl_fees = {
+                "btc": btc_pnl + btc_fees,
+                "basket": basket_pnl + basket_fees,
+            }
             # Per-model performance stats aggregated across both desks.
             model_stats = {}
             for nm, mm in self.models.items():
@@ -3481,7 +3515,16 @@ class ArenaState:
                     "btc": btc_pnl,
                     "basket": basket_pnl,
                 },
+                "desk_fees_paid_usd": {
+                    "btc": btc_fees,
+                    "basket": basket_fees,
+                },
+                "desk_pnl_excl_fees": {
+                    "btc": desk_pnl_excl_fees["btc"],
+                    "basket": desk_pnl_excl_fees["basket"],
+                },
                 "app_total_pnl_usd": app_total_pnl,
+                "app_total_pnl_excl_fees_usd": app_total_pnl + app_total_fees,
                 "paper_total_fees_usd": self.paper_total_fees_usd,
                 "paper_summary": self._ledger_summary(self.paper_ledger),
                 "models": self.models,
