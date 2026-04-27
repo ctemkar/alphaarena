@@ -5,6 +5,8 @@ Test script to evaluate signal generation strategies:
 2. simple_prompt - Simplified LLM prompt
 3. reversal - Invert all LLM signals
 4. selective_reverse - Invert only clear counter-trend signals
+5. deterministic_momentum - Skip the LLM and trade on recent move direction
+6. deterministic_confirmed - Stronger deterministic momentum with multi-tick confirmation
 """
 import os
 import sys
@@ -18,7 +20,14 @@ from pathlib import Path
 from datetime import datetime
 
 # Test configuration
-STRATEGIES = ["trend_filter", "simple_prompt", "reversal", "selective_reverse"]
+STRATEGIES = [
+    "trend_filter",
+    "simple_prompt",
+    "reversal",
+    "selective_reverse",
+    "deterministic_momentum",
+    "deterministic_confirmed",
+]
 TEST_DURATION_SECONDS = 120  # 2 minutes per strategy
 CHECK_INTERVAL_SECONDS = 5
 STATE_URL = "http://127.0.0.1:8000/api/state"
@@ -54,6 +63,9 @@ def start_server(strategy):
     env["ALPHA_HOLD_STREAK_MOMENTUM_OVERRIDE_ENABLED"] = "1"
     env["ALPHA_HOLD_STREAK_MOMENTUM_OVERRIDE_MIN_STREAK"] = "1"
     env["ALPHA_SELECTIVE_REVERSE_MIN_MOVE_PCT"] = "0.02"
+    env["ALPHA_DETERMINISTIC_MOMENTUM_MIN_MOVE_PCT"] = "0.02"
+    env["ALPHA_DETERMINISTIC_CONFIRMED_MIN_MOVE_PCT"] = "0.04"
+    env["ALPHA_DETERMINISTIC_CONFIRMED_MIN_TICKS"] = "2"
     
     # Reset paper mode state before starting
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Resetting paper mode to clear ledger...")
@@ -193,13 +205,18 @@ def run_test_for_strategy(strategy):
                 elapsed = int(now - start_time)
                 stats = get_daily_stats()
                 if stats:
+                    init = initial_stats or {}
+                    run_trades = max(0, int(stats.get("trades", 0)) - int(init.get("trades", 0)))
+                    run_wins = max(0, int(stats.get("wins", 0)) - int(init.get("wins", 0)))
+                    run_pnl = float(stats.get("total_pnl_usd", 0.0)) - float(init.get("total_pnl_usd", 0.0))
+                    run_win_rate = (100.0 * run_wins / run_trades) if run_trades > 0 else 0.0
                     print(
                         f"[{datetime.now().strftime('%H:%M:%S')}] "
                         f"Elapsed: {elapsed}s | "
-                        f"Trades: {stats['trades']} | "
-                        f"Wins: {stats['wins']} | "
-                        f"Win%: {stats['win_rate_pct']:.2f}% | "
-                        f"PnL: ${stats['total_pnl_usd']:+.2f}"
+                        f"RunTrades: {run_trades} | "
+                        f"RunWins: {run_wins} | "
+                        f"RunWin%: {run_win_rate:.2f}% | "
+                        f"RunPnL: ${run_pnl:+.2f}"
                     )
                 last_check = now
             
