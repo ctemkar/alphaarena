@@ -139,7 +139,7 @@ def get_daily_stats():
                 return None
             
             data = json.loads(resp.read().decode())
-            daily = data.get("daily", {})
+            daily = data.get("daily_summary") or data.get("daily") or {}
             
             return {
                 "trades": daily.get("trades", 0),
