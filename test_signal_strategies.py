@@ -144,6 +144,19 @@ def select_models_for_test():
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Warning: Could not select models: {e}")
         return False
 
+def settle_open_positions():
+    """Force-close open strategy positions by clearing desk selections."""
+    try:
+        status, payload = _post_json("http://127.0.0.1:8000/api/desks/clear", {})
+        if status == 200:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Settled open positions via desk clear: {payload.get('cleared', {})}")
+            return True
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Warning: desk clear returned status {status}")
+        return False
+    except Exception as e:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Warning: Could not settle positions: {e}")
+        return False
+
 def get_run_stats():
     """Get paper-session trade and PnL stats from current server state."""
     try:
@@ -221,8 +234,9 @@ def run_test_for_strategy(strategy):
             
             time.sleep(1)
         
-        # Final stats
-        time.sleep(2)  # Let any in-flight trades settle
+        # Final stats: close open positions first so scoring uses realized outcomes.
+        settle_open_positions()
+        time.sleep(2)
         final_stats = get_run_stats() or {}
 
         result = {
