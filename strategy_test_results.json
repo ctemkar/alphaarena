@@ -1,29 +1,29 @@
 {
   "trend_filter": {
-    "trades": 0,
-    "wins": 0,
-    "losses": 0,
-    "win_rate_pct": 0.0,
-    "total_pnl_usd": 0.0,
-    "max_drawdown_usd": 0.0,
-    "expectancy_usd": 0.0
+    "trades": 273,
+    "wins": 2,
+    "losses": 271,
+    "win_rate_pct": 0.73,
+    "total_pnl_usd": -1041.9061,
+    "max_drawdown_usd": 1041.9061,
+    "expectancy_usd": -3.8165
   },
   "simple_prompt": {
-    "trades": 0,
-    "wins": 0,
-    "losses": 0,
-    "win_rate_pct": 0.0,
-    "total_pnl_usd": 0.0,
-    "max_drawdown_usd": 0.0,
-    "expectancy_usd": 0.0
+    "trades": 280,
+    "wins": 2,
+    "losses": 278,
+    "win_rate_pct": 0.71,
+    "total_pnl_usd": -1075.5819,
+    "max_drawdown_usd": 1075.5819,
+    "expectancy_usd": -3.8414
   },
   "reversal": {
-    "trades": 0,
-    "wins": 0,
-    "losses": 0,
-    "win_rate_pct": 0.0,
-    "total_pnl_usd": 0.0,
-    "max_drawdown_usd": 0.0,
-    "expectancy_usd": 0.0
+    "trades": 287,
+    "wins": 2,
+    "losses": 285,
+    "win_rate_pct": 0.7,
+    "total_pnl_usd": -1106.4971,
+    "max_drawdown_usd": 1106.4971,
+    "expectancy_usd": -3.8554
   }
 }

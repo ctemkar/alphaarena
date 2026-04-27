@@ -33,3 +33,4 @@ movement_log.jsonl
 logs/*.jsonl
 logs/quantplot_watch_48h.jsonl
 paper_monitor_status.json
+strategy_test_results.json

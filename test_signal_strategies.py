@@ -205,10 +205,31 @@ def run_test_for_strategy(strategy):
         
         # Final stats
         time.sleep(2)  # Let any in-flight trades settle
-        final_stats = get_daily_stats()
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Final stats: {final_stats}")
-        
-        return final_stats
+        final_stats = get_daily_stats() or {}
+
+        init = initial_stats or {}
+        d_trades = max(0, int(final_stats.get("trades", 0)) - int(init.get("trades", 0)))
+        d_wins = max(0, int(final_stats.get("wins", 0)) - int(init.get("wins", 0)))
+        d_losses = max(0, int(final_stats.get("losses", 0)) - int(init.get("losses", 0)))
+        d_pnl = float(final_stats.get("total_pnl_usd", 0.0)) - float(init.get("total_pnl_usd", 0.0))
+        d_expectancy = (d_pnl / d_trades) if d_trades > 0 else 0.0
+        d_win_rate = (100.0 * d_wins / d_trades) if d_trades > 0 else 0.0
+
+        result = {
+            "trades": d_trades,
+            "wins": d_wins,
+            "losses": d_losses,
+            "win_rate_pct": round(d_win_rate, 2),
+            "total_pnl_usd": round(d_pnl, 4),
+            "expectancy_usd": round(d_expectancy, 4),
+            "max_drawdown_usd": float(final_stats.get("max_drawdown_usd", 0.0)),
+            "initial_snapshot": init,
+            "final_snapshot": final_stats,
+        }
+
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Final delta stats: {result}")
+
+        return result
         
     finally:
         stop_server(server)
