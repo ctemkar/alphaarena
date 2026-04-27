@@ -308,6 +308,16 @@ try:
 except ValueError:
     DETERMINISTIC_CONFIRMED_MIN_TICKS = 2
 
+AI_FALLBACK_CONFIRMATION_ENABLED = os.getenv("ALPHA_AI_FALLBACK_CONFIRMATION_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+try:
+    AI_FALLBACK_MIN_MOVE_PCT = float(os.getenv("ALPHA_AI_FALLBACK_MIN_MOVE_PCT", "0.04"))
+except ValueError:
+    AI_FALLBACK_MIN_MOVE_PCT = 0.04
+try:
+    AI_FALLBACK_MIN_TICKS = int(os.getenv("ALPHA_AI_FALLBACK_MIN_TICKS", "2"))
+except ValueError:
+    AI_FALLBACK_MIN_TICKS = 2
+
 ALWAYS_TRADE_ENABLED = os.getenv("ALPHA_ALWAYS_TRADE_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 DISABLE_GROK_AUTO_SELECT = os.getenv("ALPHA_DISABLE_GROK_AUTO_SELECT", "1").strip().lower() in {"1", "true", "yes", "on"}
@@ -751,6 +761,8 @@ class ArenaState:
             min_compares=EXECUTION_CORE_CUTOVER_MIN_COMPARES,
             stability_checks=EXECUTION_CORE_CUTOVER_STABILITY_CHECKS,
         )
+        self.raw_signal_stats: dict[str, dict[str, dict[str, float | int]]] = {}
+        self.pending_raw_signal_evals: list[dict] = []
         # Queue for Ollama signal generation (parallel workers to avoid bottleneck)
         self.ollama_signal_queue: queue.Queue[tuple[str, str, str, float]] = queue.Queue()
         self.ollama_signal_pending: set[tuple[str, str]] = set()
@@ -2029,6 +2041,9 @@ class ArenaState:
                 move_pct = self._desk_recent_move_pct(desk_key)
                 entry_move_threshold = max(MIN_TRADE_MOVE_PCT, MIN_PROFIT_EDGE_PCT)
                 momentum_threshold = max(MOMENTUM_OVERRIDE_THRESHOLD_PCT, entry_move_threshold)
+                key = "btc" if desk_key == "btc" else "basket"
+                prices_seq = [h[key] for h in history if key in h]
+                raw_action = action
                 if err:
                     with self.lock:
                         self.add_log(
@@ -2037,13 +2052,29 @@ class ArenaState:
                         )
                     # Momentum-based fallback for errors: only go directional if move beats fee break-even
                     if abs(move_pct) >= momentum_threshold:
-                        action = 1 if move_pct > 0 else -1
+                        if AI_FALLBACK_CONFIRMATION_ENABLED:
+                            action = self._confirmed_directional_action(
+                                prices_seq,
+                                move_pct,
+                                max(AI_FALLBACK_MIN_MOVE_PCT, momentum_threshold),
+                                max(1, AI_FALLBACK_MIN_TICKS),
+                            )
+                        else:
+                            action = 1 if move_pct > 0 else -1
                     else:
                         action = 0  # Flat market — stay HOLD
                 # If AI is neutral (action == 0), only use momentum as tiebreaker above meaningful threshold
                 elif action == 0:
                     if abs(move_pct) >= momentum_threshold:
-                        action = 1 if move_pct > 0 else -1
+                        if AI_FALLBACK_CONFIRMATION_ENABLED:
+                            action = self._confirmed_directional_action(
+                                prices_seq,
+                                move_pct,
+                                max(AI_FALLBACK_MIN_MOVE_PCT, momentum_threshold),
+                                max(1, AI_FALLBACK_MIN_TICKS),
+                            )
+                        else:
+                            action = 1 if move_pct > 0 else -1
                 # Flat-market gate: suppress directional signals when market isn't moving enough to
                 # overcome round-trip fees (~20 bps).  Forces HOLD in choppy/sideways conditions.
                 suppressed_by_move_gate = False
@@ -2072,6 +2103,7 @@ class ArenaState:
                     if self.pause_all_desks or self.paused_desks.get(desk_key, False):
                         self.add_log(f"{name} [{desk_key.upper()}]: signal skipped (desk paused)")
                         continue
+                    self._queue_raw_signal_eval_unlocked(name, desk_key, raw_action, ref_price, bool(err))
                     side = "LONG" if action == 1 else ("SHORT" if action == -1 else "HOLD")
                     if suppressed_by_move_gate:
                         self.add_log(
@@ -2778,6 +2810,90 @@ class ArenaState:
         self.desk_forced_side[desk] = side
         return side
 
+    def _confirmed_directional_action(
+        self,
+        prices_seq: list[float],
+        move_pct: float,
+        min_move_pct: float,
+        min_ticks: int,
+    ) -> int:
+        if len(prices_seq) < max(2, min_ticks + 1):
+            return 0
+        recent_changes = [
+            prices_seq[idx] - prices_seq[idx - 1]
+            for idx in range(len(prices_seq) - min_ticks, len(prices_seq))
+        ]
+        if move_pct >= min_move_pct and all(change > 0 for change in recent_changes):
+            return 1
+        if move_pct <= -min_move_pct and all(change < 0 for change in recent_changes):
+            return -1
+        return 0
+
+    def _raw_signal_bucket(self, model_name: str, desk: str) -> dict[str, float | int]:
+        model_stats = self.raw_signal_stats.setdefault(model_name, {})
+        return model_stats.setdefault(
+            desk,
+            {
+                "samples": 0,
+                "directional": 0,
+                "directional_correct": 0,
+                "holds": 0,
+                "hold_correct": 0,
+                "errors": 0,
+                "avg_abs_forward_move_pct": 0.0,
+            },
+        )
+
+    def _queue_raw_signal_eval_unlocked(
+        self,
+        model_name: str,
+        desk: str,
+        raw_action: int,
+        ref_price: float,
+        had_error: bool,
+    ) -> None:
+        self.pending_raw_signal_evals.append(
+            {
+                "model": model_name,
+                "desk": desk,
+                "action": int(raw_action),
+                "price": float(ref_price),
+                "had_error": bool(had_error),
+            }
+        )
+
+    def _score_pending_raw_signals_unlocked(self) -> None:
+        if not self.pending_raw_signal_evals:
+            return
+        hold_flat_threshold = max(MIN_TRADE_MOVE_PCT, MIN_PROFIT_EDGE_PCT, MOMENTUM_OVERRIDE_THRESHOLD_PCT)
+        pending = self.pending_raw_signal_evals
+        self.pending_raw_signal_evals = []
+        for item in pending:
+            desk = str(item.get("desk") or "btc")
+            signal_price = float(item.get("price", 0.0) or 0.0)
+            current_price = float(self.prices.get("btc" if desk == "btc" else "basket", 0.0) or 0.0)
+            if signal_price <= 0.0 or current_price <= 0.0:
+                continue
+            forward_move_pct = ((current_price - signal_price) / signal_price) * 100.0
+            bucket = self._raw_signal_bucket(str(item.get("model") or "?"), desk)
+            bucket["samples"] = int(bucket.get("samples", 0)) + 1
+            if item.get("had_error"):
+                bucket["errors"] = int(bucket.get("errors", 0)) + 1
+            samples = int(bucket.get("samples", 0))
+            prev_avg = float(bucket.get("avg_abs_forward_move_pct", 0.0) or 0.0)
+            bucket["avg_abs_forward_move_pct"] = prev_avg + ((abs(forward_move_pct) - prev_avg) / max(samples, 1))
+
+            raw_action = int(item.get("action", 0) or 0)
+            if raw_action == 0:
+                bucket["holds"] = int(bucket.get("holds", 0)) + 1
+                if abs(forward_move_pct) < hold_flat_threshold:
+                    bucket["hold_correct"] = int(bucket.get("hold_correct", 0)) + 1
+                continue
+
+            bucket["directional"] = int(bucket.get("directional", 0)) + 1
+            if (raw_action > 0 and forward_move_pct > 0) or (raw_action < 0 and forward_move_pct < 0):
+                bucket["directional_correct"] = int(bucket.get("directional_correct", 0)) + 1
+
     def _model_score(self, name: str, desk: str) -> float:
         slot = self.models[name]["desk_state"][desk]
         if self.strict_no_simulation and self.live_trading:
@@ -2805,7 +2921,12 @@ class ArenaState:
         total_signals = hold_signals + directional_signals
         hold_ratio = (hold_signals / total_signals) if total_signals else 0.5
         hold_penalty = (hold_ratio * self.hold_score_penalty) + (min(hold_streak, 10) * 0.5)
-        return pnl + ((win_rate - 0.5) * 20.0) + (expectancy * 0.25) + continuity - hold_penalty
+        raw_bucket = self.raw_signal_stats.get(name, {}).get(desk, {})
+        raw_directional = int(raw_bucket.get("directional", 0) or 0)
+        raw_correct = int(raw_bucket.get("directional_correct", 0) or 0)
+        raw_accuracy = (raw_correct / raw_directional) if raw_directional else 0.5
+        raw_signal_bonus = ((raw_accuracy - 0.5) * 12.0) if raw_directional >= 3 else 0.0
+        return pnl + ((win_rate - 0.5) * 20.0) + (expectancy * 0.25) + continuity + raw_signal_bonus - hold_penalty
 
     def _select_model_unlocked(self, name: str, desk: str = "btc") -> bool:
         m = self.models.get(name)
@@ -3160,6 +3281,7 @@ class ArenaState:
                 self.add_log(f"LIVE FEED LOST: trading paused | cause: {self.feed_error}")
 
         self.recalc_basket()
+    self._score_pending_raw_signals_unlocked()
         # Save to rolling price history (used to enrich LLM prompts)
         self.price_history.append({
             "btc":    self.prices["btc"],
