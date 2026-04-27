@@ -66,8 +66,10 @@ def _start_server() -> subprocess.Popen:
     env["ALPHA_BASE_SIGNAL_CHANCE"] = "1.0"
     env["ALPHA_MIN_PROFIT_EDGE_PCT"] = "0.0"
     env["ALPHA_MIN_TRADE_MOVE_PCT"] = "0.0"
-    env["ALPHA_MOMENTUM_OVERRIDE_THRESHOLD_PCT"] = "0.02"
-    env["ALPHA_HOLD_STREAK_MOMENTUM_OVERRIDE_ENABLED"] = "0"
+    env["ALPHA_MOMENTUM_OVERRIDE_THRESHOLD_PCT"] = "0.0"
+    env["ALPHA_HOLD_STREAK_MOMENTUM_OVERRIDE_ENABLED"] = "1"
+    env["ALPHA_HOLD_STREAK_MOMENTUM_OVERRIDE_MIN_STREAK"] = "1"
+    env["ALPHA_ALWAYS_TRADE_ENABLED"] = "1"
 
     return subprocess.Popen(
         [sys.executable, "quantplot_ai_server.py"],
