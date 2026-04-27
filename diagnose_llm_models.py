@@ -18,7 +18,7 @@ CLEAR_URL = "http://127.0.0.1:8000/api/desks/clear"
 DURATION_SECONDS = max(5, int(os.getenv("ALPHA_DIAG_DURATION_SECONDS", "10")))
 CHECK_SECONDS = max(5, int(os.getenv("ALPHA_DIAG_CHECK_SECONDS", "5")))
 MAX_MODELS = max(1, int(os.getenv("ALPHA_DIAG_MAX_MODELS", "7")))
-TARGET_DESK = "btc"
+TARGET_DESK = os.getenv("ALPHA_DIAG_DESK", "btc").strip().lower() or "btc"
 
 
 def _post_json(url: str, payload: dict) -> tuple[int, dict]:
