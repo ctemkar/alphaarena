@@ -12,6 +12,7 @@ import threading
 import time
 import hmac
 import hashlib
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -85,16 +86,20 @@ def _load_dotenv(path: str = ".env") -> None:
         val = val.strip().strip('"').strip("'")
         if not key:
             continue
-        # Strategy tuning lives under ALPHA_* and should follow .env defaults
-        # even if the shell has stale exported values from earlier runs.
+        # Treat .env as defaults; explicit exported env vars should win.
         if key.startswith("ALPHA_"):
-            os.environ[key] = val
+            if key not in os.environ:
+                os.environ[key] = val
             continue
         if key not in os.environ:
             os.environ[key] = val
 
 
 _load_dotenv()
+INSECURE_SSL_ENABLED = os.getenv("ALPHA_INSECURE_SSL", "0").strip().lower() in {"1", "true", "yes", "on"}
+if INSECURE_SSL_ENABLED:
+    # Explicitly opt-in: allows HTTPS in environments with self-signed MITM certs.
+    ssl._create_default_https_context = ssl._create_unverified_context
 BINANCE_API_KEY = os.getenv("EXCH_BINANCE_API_KEY", "") or os.getenv("BINANCE_KEY", "")
 BINANCE_API_SECRET = os.getenv("EXCH_BINANCE_API_SECRET", "") or os.getenv("BINANCE_SECRET", "")
 PUTER_AUTH_TOKEN = os.getenv("PUTER_AUTH_TOKEN", "") or os.getenv("puterAuthToken", "")
@@ -111,6 +116,13 @@ try:
     ANALYTICS_SLIPPAGE_BPS = float(os.getenv("ALPHA_ANALYTICS_SLIPPAGE_BPS", "5"))
 except ValueError:
     ANALYTICS_SLIPPAGE_BPS = 5.0
+
+# Profitability floor: require directional setups to clear a minimum move edge
+# in the short 8-tick momentum window. Values are in percent.
+try:
+    MIN_PROFIT_EDGE_PCT = float(os.getenv("ALPHA_MIN_PROFIT_EDGE_PCT", "0.08"))
+except ValueError:
+    MIN_PROFIT_EDGE_PCT = 0.08
 
 try:
     LIVE_ORDER_USD = float(os.getenv("ALPHA_LIVE_ORDER_USD", "80"))
@@ -235,8 +247,8 @@ except ValueError:
     AGGRESSIVE_POSITION_MULTIPLIER = 1.35
 
 # Minimum recent price move % required to allow a directional trade.
-# Below this threshold the market is too flat to overcome round-trip fees (~20 bps),
-# so all signals are suppressed to HOLD.  Override via ALPHA_MIN_TRADE_MOVE_PCT.
+# This is combined with MIN_PROFIT_EDGE_PCT at runtime so entries only pass when
+# recent movement is large enough to cover transaction costs and a small edge buffer.
 try:
     MIN_TRADE_MOVE_PCT = float(os.getenv("ALPHA_MIN_TRADE_MOVE_PCT", "0.0"))
 except ValueError:
@@ -266,6 +278,16 @@ try:
     DIRECTIONAL_STREAK_STRONG_MOVE_PCT = float(os.getenv("ALPHA_DIRECTIONAL_STREAK_STRONG_MOVE_PCT", "0.06"))
 except ValueError:
     DIRECTIONAL_STREAK_STRONG_MOVE_PCT = 0.06
+
+# Strategy selection for signal filtering:
+# 'trend_filter' (default) = Strict trend filtering (rejects counter-trend signals)
+# 'simple_prompt' = Simplified prompt (basic momentum only, no complex context)
+# 'reversal' = Inverts all LLM signals (LONG→SHORT, SHORT→LONG)
+SIGNAL_STRATEGY = os.getenv("ALPHA_SIGNAL_STRATEGY", "trend_filter").strip().lower()
+try:
+    STRICT_TREND_FILTER_PCT = float(os.getenv("ALPHA_STRICT_TREND_FILTER_PCT", "0.05"))
+except ValueError:
+    STRICT_TREND_FILTER_PCT = 0.05
 
 ALWAYS_TRADE_ENABLED = os.getenv("ALPHA_ALWAYS_TRADE_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -310,6 +332,14 @@ PUTER_HELPER = Path(__file__).resolve().parent / "scripts" / "puter_grok_chat.mj
 def _signal_prompt(price: float, desk: str, price_history: list[dict] | None = None) -> str:
     asset = "BTC" if desk == "btc" else "BASKET (BTC/ETH/SOL/BNB)"
     key = "btc" if desk == "btc" else "basket"
+
+    # Use simplified prompt if strategy is 'simple_prompt'
+    if SIGNAL_STRATEGY == "simple_prompt":
+        return (
+            f"Crypto price: {asset} ${price:,.2f}. "
+            "LONG (bullish), SHORT (bearish), or HOLD (neutral)? "
+            "One word: LONG, SHORT, or HOLD."
+        )
 
     trend_lines = []
     move_pct = 0.0
@@ -712,6 +742,11 @@ class ArenaState:
         # Start multiple parallel Ollama signal workers (OLLAMA_NUM_WORKERS threads)
         for _ in range(OLLAMA_NUM_WORKERS):
             threading.Thread(target=self._ollama_signal_worker, daemon=True).start()
+        # Log active strategy on startup
+        self.add_log(
+            f"STARTUP: Signal strategy = {SIGNAL_STRATEGY.upper()} "
+            f"(trend_threshold={STRICT_TREND_FILTER_PCT:.3f}% if trend_filter)"
+        )
 
     @staticmethod
     def _default_daily_summary(day: str) -> dict:
@@ -1939,6 +1974,8 @@ class ArenaState:
                 action, err = _ollama_signal(resolved_tag, ref_price, desk_key, history)
                 latency_ms = (time.perf_counter() - started) * 1000.0
                 move_pct = self._desk_recent_move_pct(desk_key)
+                entry_move_threshold = max(MIN_TRADE_MOVE_PCT, MIN_PROFIT_EDGE_PCT)
+                momentum_threshold = max(MOMENTUM_OVERRIDE_THRESHOLD_PCT, entry_move_threshold)
                 if err:
                     with self.lock:
                         self.add_log(
@@ -1946,18 +1983,18 @@ class ArenaState:
                             f"(provider={signal_provider}, arm={signal_arm}, using momentum fallback)"
                         )
                     # Momentum-based fallback for errors: only go directional if move beats fee break-even
-                    if abs(move_pct) >= MOMENTUM_OVERRIDE_THRESHOLD_PCT:
+                    if abs(move_pct) >= momentum_threshold:
                         action = 1 if move_pct > 0 else -1
                     else:
                         action = 0  # Flat market — stay HOLD
                 # If AI is neutral (action == 0), only use momentum as tiebreaker above meaningful threshold
                 elif action == 0:
-                    if abs(move_pct) >= MOMENTUM_OVERRIDE_THRESHOLD_PCT:
+                    if abs(move_pct) >= momentum_threshold:
                         action = 1 if move_pct > 0 else -1
                 # Flat-market gate: suppress directional signals when market isn't moving enough to
                 # overcome round-trip fees (~20 bps).  Forces HOLD in choppy/sideways conditions.
                 suppressed_by_move_gate = False
-                if action != 0 and abs(move_pct) < MIN_TRADE_MOVE_PCT:
+                if action != 0 and abs(move_pct) < entry_move_threshold:
                     action = 0
                     suppressed_by_move_gate = True
                 # Guardrail: do not take directional entries that directly conflict with
@@ -1986,14 +2023,18 @@ class ArenaState:
                     if suppressed_by_move_gate:
                         self.add_log(
                             f"{name} [{desk_key.upper()}]: directional signal suppressed "
-                            f"(move {move_pct:+.4f}% < min {MIN_TRADE_MOVE_PCT:.4f}%)"
+                            f"(move {move_pct:+.4f}% < min {entry_move_threshold:.4f}%)"
                         )
                     if suppressed_by_trend_conflict:
                         self.add_log(
                             f"{name} [{desk_key.upper()}]: directional signal suppressed "
                             f"(signal conflicts with move {move_pct:+.4f}% trend)"
                         )
-                    hard_live_block = self.live_blocked and "Insufficient USDT" not in self.live_blocked_reason
+                    hard_live_block = (
+                        (not self.paper_mode)
+                        and self.live_blocked
+                        and "Insufficient USDT" not in self.live_blocked_reason
+                    )
                     if self.live_trading and hard_live_block and side in {"LONG", "SHORT"}:
                         side = "HOLD"
                     bias_throttle_reason = ""
@@ -2008,6 +2049,7 @@ class ArenaState:
                         and self.always_trade_enabled
                         and not self.kill_switch
                         and not (self.live_trading and hard_live_block)
+                        and abs(move_pct) >= entry_move_threshold
                     ):
                         side = self._always_trade_side(desk_key, move_pct)
                         self.add_log(
@@ -2104,7 +2146,7 @@ class ArenaState:
                 return False
             if not self.live_trading and not self.paper_mode:
                 return False
-            if self.require_live_feed and not self.live_feed:
+            if self.require_live_feed and not self.live_feed and not self.paper_mode:
                 return False
             if self.kill_switch:
                 return False
@@ -2328,7 +2370,7 @@ class ArenaState:
                 # In paper mode we still want execution planning and simulated fills
                 # even if real live trading is disabled.
                 live_trading=(self.live_trading or self.paper_mode),
-                require_live_feed=self.require_live_feed,
+                require_live_feed=(self.require_live_feed and not self.paper_mode),
                 live_feed=self.live_feed,
                 kill_switch=self.kill_switch,
                 pause_all_desks=self.pause_all_desks,
@@ -3085,7 +3127,7 @@ class ArenaState:
         })
 
     def step_models(self) -> None:
-        if self.require_live_feed and not self.live_feed:
+        if self.require_live_feed and not self.live_feed and not self.paper_mode:
             return
         for name, m in self.models.items():
             for desk in ("btc", "basket"):
@@ -3118,15 +3160,29 @@ class ArenaState:
         if err:
             self.add_log(f"{name} [{desk_key.upper()}]: LLM error — {err} (treated as HOLD)")
             action = 0
+        
+        # Apply reversal strategy if configured
+        if SIGNAL_STRATEGY == "reversal":
+            action = -action  # Invert signal: LONG->SHORT, SHORT->LONG, HOLD->HOLD
+        
         move_pct = self._desk_recent_move_pct(desk_key)
+        entry_move_threshold = max(MIN_TRADE_MOVE_PCT, MIN_PROFIT_EDGE_PCT)
+        momentum_threshold = max(MOMENTUM_OVERRIDE_THRESHOLD_PCT, entry_move_threshold)
         # Flat-market gate: suppress directional signal if market isn't moving enough
         if action != 0:
-            if abs(move_pct) < MIN_TRADE_MOVE_PCT:
+            if abs(move_pct) < entry_move_threshold:
                 action = 0
+        
+        # Apply trend filtering based on strategy
+        if SIGNAL_STRATEGY == "trend_filter":
+            trend_threshold = STRICT_TREND_FILTER_PCT
+        else:
+            trend_threshold = MOMENTUM_OVERRIDE_THRESHOLD_PCT
+        
         # Guardrail: suppress entries that directly oppose current desk momentum direction.
-        if action == 1 and move_pct <= -MOMENTUM_OVERRIDE_THRESHOLD_PCT:
+        if action == 1 and move_pct <= -trend_threshold:
             action = 0
-        elif action == -1 and move_pct >= MOMENTUM_OVERRIDE_THRESHOLD_PCT:
+        elif action == -1 and move_pct >= trend_threshold:
             action = 0
         live_desk = desk_key
         live_side = "HOLD"
@@ -3145,13 +3201,17 @@ class ArenaState:
                 action == 0
                 and HOLD_STREAK_MOMENTUM_OVERRIDE_ENABLED
                 and int(slot.get("hold_streak", 0)) >= max(1, HOLD_STREAK_MOMENTUM_OVERRIDE_MIN_STREAK)
-                and abs(move_pct) >= MOMENTUM_OVERRIDE_THRESHOLD_PCT
+                and abs(move_pct) >= momentum_threshold
             ):
                 action = 1 if move_pct > 0 else -1
                 hold_override_used = True
 
             side = "LONG" if action == 1 else ("SHORT" if action == -1 else "HOLD")
-            hard_live_block = self.live_blocked and "Insufficient USDT" not in self.live_blocked_reason
+            hard_live_block = (
+                (not self.paper_mode)
+                and self.live_blocked
+                and "Insufficient USDT" not in self.live_blocked_reason
+            )
             if self.live_trading and hard_live_block and side in {"LONG", "SHORT"}:
                 side = "HOLD"
             slot["signal_source"] = "ai"
@@ -3643,13 +3703,33 @@ class ArenaHandler(SimpleHTTPRequestHandler):
                 if self.state.paper_mode and changed:
                     self.state.paper_ledger = {}
                     self.state.paper_total_fees_usd = 0.0
+                    for model_state in self.state.models.values():
+                        for desk_key in ("btc", "basket"):
+                            slot = model_state["desk_state"][desk_key]
+                            ref_price = self.state.prices["btc"] if desk_key == "btc" else self.state.prices["basket"]
+                            self.state._reset_internal_slot_pnl_unlocked(slot, ref_price)
+                            slot["trades"] = 0
+                            slot["wins"] = 0
+                            slot["losses"] = 0
+                            slot["directional_signals"] = 0
+                            slot["hold_signals"] = 0
+                            slot["hold_streak"] = 0
                     self.state.kill_switch = False
                     self.state.halt_reason = ""
                     self.state.guardrail_day = datetime.utcnow().strftime("%Y-%m-%d")
                     self.state.profit_lock_anchor = self.state._effective_portfolio_pnl()
                     self.state.profit_lock_cooldown_left = 0
                     self.state.profit_lock_reason = ""
+                    self.state.always_trade_enabled = False
+                    self.state.auto_select_interval_ticks = 10
+                    self.state.live_duplicate_cooldown_seconds = 45.0
+                    self.state.live_symbol_cooldown_seconds = 60.0
+                    self.state.one_live_entry_global_per_tick = True
+                    self.state.one_live_entry_per_desk_per_tick = True
                     self.state.add_log("Paper ledger reset for fresh run")
+                    self.state.add_log(
+                        "Paper profit profile ENABLED (always-trade=off, auto-select=10 ticks, duplicate cooldown=45s, symbol cooldown=60s, one-entry-per-tick=on, edge filter active)"
+                    )
                 label = "PAPER (no real orders)" if self.state.paper_mode else "LIVE (real orders)"
                 self.state.add_log(f"Paper mode {'ENABLED' if self.state.paper_mode else 'DISABLED'} \u2014 {label}")
             self._json(200, {"ok": True, "changed": changed, "paper_mode": bool(enabled_raw)})
