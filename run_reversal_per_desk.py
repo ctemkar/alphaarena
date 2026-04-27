@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import urllib.error
 from datetime import datetime
 
 STATE_URL = "http://127.0.0.1:8000/api/state"
@@ -38,6 +39,17 @@ def _post_json(url: str, payload: dict):
 def _get_state() -> dict:
     with urllib.request.urlopen(urllib.request.Request(STATE_URL), timeout=6) as resp:
         return json.loads(resp.read().decode())
+
+
+def _get_state_with_retry(max_tries: int = 5, sleep_seconds: float = 1.0) -> dict | None:
+    for _ in range(max_tries):
+        try:
+            return _get_state()
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
+            time.sleep(sleep_seconds)
+        except Exception:
+            time.sleep(sleep_seconds)
+    return None
 
 
 def _wait_ready(max_tries: int = 30) -> bool:
@@ -95,8 +107,24 @@ def run_one_desk(desk: str) -> dict:
         _post_json(SELECT_URL, {"model": MODELS[desk], "desk": desk})
 
         loops = DURATION_SECONDS // CHECK_SECONDS
+        missed_state_reads = 0
         for i in range(loops):
-            state = _get_state()
+            if proc.poll() is not None:
+                return {
+                    "desk": desk,
+                    "model": MODELS[desk],
+                    "duration_seconds": DURATION_SECONDS,
+                    "error": "server_exited_early",
+                    "samples_collected": len(samples),
+                }
+
+            state = _get_state_with_retry(max_tries=4, sleep_seconds=0.8)
+            if state is None:
+                missed_state_reads += 1
+                print(f"  t={i * CHECK_SECONDS:>3}s state_read_failed")
+                time.sleep(CHECK_SECONDS)
+                continue
+
             desk_pnl = float((state.get("desk_pnl") or {}).get(desk, 0.0) or 0.0)
             ps = state.get("paper_summary") or {}
             print(
@@ -106,13 +134,13 @@ def run_one_desk(desk: str) -> dict:
             samples.append(desk_pnl)
             time.sleep(CHECK_SECONDS)
 
-        before_clear = _get_state()
+        before_clear = _get_state_with_retry(max_tries=6, sleep_seconds=1.0) or {}
         pre_clear = float((before_clear.get("desk_pnl") or {}).get(desk, 0.0) or 0.0)
 
         _post_json(CLEAR_URL, {})
         time.sleep(2)
 
-        after_clear = _get_state()
+        after_clear = _get_state_with_retry(max_tries=6, sleep_seconds=1.0) or {}
         post_clear = float((after_clear.get("desk_pnl") or {}).get(desk, 0.0) or 0.0)
 
         return {
@@ -121,6 +149,8 @@ def run_one_desk(desk: str) -> dict:
             "duration_seconds": DURATION_SECONDS,
             "min_desk_pnl": min(samples) if samples else 0.0,
             "max_desk_pnl": max(samples) if samples else 0.0,
+            "samples_collected": len(samples),
+            "state_read_failures": missed_state_reads,
             "pre_clear_desk_pnl": pre_clear,
             "post_clear_desk_pnl": post_clear,
             "paper_summary_after_clear": after_clear.get("paper_summary", {}),
