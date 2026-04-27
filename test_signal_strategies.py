@@ -144,8 +144,8 @@ def select_models_for_test():
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Warning: Could not select models: {e}")
         return False
 
-def get_daily_stats():
-    """Get win rate and trade stats from current server state"""
+def get_run_stats():
+    """Get paper-session trade and PnL stats from current server state."""
     try:
         req = urllib.request.Request(STATE_URL)
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -153,16 +153,20 @@ def get_daily_stats():
                 return None
             
             data = json.loads(resp.read().decode())
-            daily = data.get("daily_summary") or data.get("daily") or {}
+            paper = data.get("paper_summary") or {}
             
             return {
-                "trades": daily.get("trades", 0),
-                "wins": daily.get("wins", 0),
-                "losses": daily.get("losses", 0),
-                "win_rate_pct": daily.get("win_rate_pct", 0.0),
-                "total_pnl_usd": daily.get("total_pnl_usd", 0.0),
-                "max_drawdown_usd": daily.get("max_drawdown_usd", 0.0),
-                "expectancy_usd": daily.get("expectancy_usd", 0.0),
+                "trades": int(paper.get("trades", 0)),
+                "wins": int(paper.get("wins", 0)),
+                "losses": int(paper.get("losses", 0)),
+                "win_rate_pct": float(paper.get("win_rate_pct", 0.0)),
+                "total_pnl_usd": float(data.get("app_total_pnl_usd", 0.0)),
+                "max_drawdown_usd": abs(float(data.get("app_total_pnl_usd", 0.0))),
+                "expectancy_usd": (
+                    float(data.get("app_total_pnl_usd", 0.0)) / max(1, int(paper.get("trades", 0)))
+                    if int(paper.get("trades", 0)) > 0
+                    else 0.0
+                ),
             }
     except Exception as e:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Error fetching stats: {e}")
@@ -189,7 +193,7 @@ def run_test_for_strategy(strategy):
         time.sleep(2)
         
         # Initial stats
-        initial_stats = get_daily_stats()
+        initial_stats = get_run_stats()
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Initial stats: {initial_stats}")
         
         # Run for TEST_DURATION_SECONDS
@@ -203,20 +207,15 @@ def run_test_for_strategy(strategy):
             if now - last_check >= CHECK_INTERVAL_SECONDS:
                 check_count += 1
                 elapsed = int(now - start_time)
-                stats = get_daily_stats()
+                stats = get_run_stats()
                 if stats:
-                    init = initial_stats or {}
-                    run_trades = max(0, int(stats.get("trades", 0)) - int(init.get("trades", 0)))
-                    run_wins = max(0, int(stats.get("wins", 0)) - int(init.get("wins", 0)))
-                    run_pnl = float(stats.get("total_pnl_usd", 0.0)) - float(init.get("total_pnl_usd", 0.0))
-                    run_win_rate = (100.0 * run_wins / run_trades) if run_trades > 0 else 0.0
                     print(
                         f"[{datetime.now().strftime('%H:%M:%S')}] "
                         f"Elapsed: {elapsed}s | "
-                        f"RunTrades: {run_trades} | "
-                        f"RunWins: {run_wins} | "
-                        f"RunWin%: {run_win_rate:.2f}% | "
-                        f"RunPnL: ${run_pnl:+.2f}"
+                        f"RunTrades: {stats['trades']} | "
+                        f"RunWins: {stats['wins']} | "
+                        f"RunWin%: {stats['win_rate_pct']:.2f}% | "
+                        f"RunPnL: ${stats['total_pnl_usd']:+.2f}"
                     )
                 last_check = now
             
@@ -224,25 +223,17 @@ def run_test_for_strategy(strategy):
         
         # Final stats
         time.sleep(2)  # Let any in-flight trades settle
-        final_stats = get_daily_stats() or {}
-
-        init = initial_stats or {}
-        d_trades = max(0, int(final_stats.get("trades", 0)) - int(init.get("trades", 0)))
-        d_wins = max(0, int(final_stats.get("wins", 0)) - int(init.get("wins", 0)))
-        d_losses = max(0, int(final_stats.get("losses", 0)) - int(init.get("losses", 0)))
-        d_pnl = float(final_stats.get("total_pnl_usd", 0.0)) - float(init.get("total_pnl_usd", 0.0))
-        d_expectancy = (d_pnl / d_trades) if d_trades > 0 else 0.0
-        d_win_rate = (100.0 * d_wins / d_trades) if d_trades > 0 else 0.0
+        final_stats = get_run_stats() or {}
 
         result = {
-            "trades": d_trades,
-            "wins": d_wins,
-            "losses": d_losses,
-            "win_rate_pct": round(d_win_rate, 2),
-            "total_pnl_usd": round(d_pnl, 4),
-            "expectancy_usd": round(d_expectancy, 4),
+            "trades": int(final_stats.get("trades", 0)),
+            "wins": int(final_stats.get("wins", 0)),
+            "losses": int(final_stats.get("losses", 0)),
+            "win_rate_pct": round(float(final_stats.get("win_rate_pct", 0.0)), 2),
+            "total_pnl_usd": round(float(final_stats.get("total_pnl_usd", 0.0)), 4),
+            "expectancy_usd": round(float(final_stats.get("expectancy_usd", 0.0)), 4),
             "max_drawdown_usd": float(final_stats.get("max_drawdown_usd", 0.0)),
-            "initial_snapshot": init,
+            "initial_snapshot": initial_stats or {},
             "final_snapshot": final_stats,
         }
 

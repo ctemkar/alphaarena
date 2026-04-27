@@ -284,6 +284,8 @@ except ValueError:
 # 'simple_prompt' = Simplified prompt (basic momentum only, no complex context)
 # 'reversal' = Inverts all LLM signals (LONG->SHORT, SHORT->LONG)
 # 'selective_reverse' = Invert only when the AI conflicts with strong momentum
+# 'deterministic_momentum' = Skip the LLM and trade directly from recent move direction
+# 'deterministic_confirmed' = Stronger deterministic momentum with multi-tick confirmation
 SIGNAL_STRATEGY = os.getenv("ALPHA_SIGNAL_STRATEGY", "trend_filter").strip().lower()
 try:
     STRICT_TREND_FILTER_PCT = float(os.getenv("ALPHA_STRICT_TREND_FILTER_PCT", "0.05"))
@@ -293,6 +295,18 @@ try:
     SELECTIVE_REVERSE_MIN_MOVE_PCT = float(os.getenv("ALPHA_SELECTIVE_REVERSE_MIN_MOVE_PCT", "0.02"))
 except ValueError:
     SELECTIVE_REVERSE_MIN_MOVE_PCT = 0.02
+try:
+    DETERMINISTIC_MOMENTUM_MIN_MOVE_PCT = float(os.getenv("ALPHA_DETERMINISTIC_MOMENTUM_MIN_MOVE_PCT", "0.02"))
+except ValueError:
+    DETERMINISTIC_MOMENTUM_MIN_MOVE_PCT = 0.02
+try:
+    DETERMINISTIC_CONFIRMED_MIN_MOVE_PCT = float(os.getenv("ALPHA_DETERMINISTIC_CONFIRMED_MIN_MOVE_PCT", "0.04"))
+except ValueError:
+    DETERMINISTIC_CONFIRMED_MIN_MOVE_PCT = 0.04
+try:
+    DETERMINISTIC_CONFIRMED_MIN_TICKS = int(os.getenv("ALPHA_DETERMINISTIC_CONFIRMED_MIN_TICKS", "2"))
+except ValueError:
+    DETERMINISTIC_CONFIRMED_MIN_TICKS = 2
 
 ALWAYS_TRADE_ENABLED = os.getenv("ALPHA_ALWAYS_TRADE_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -755,6 +769,15 @@ class ArenaState:
         if SIGNAL_STRATEGY == "selective_reverse":
             self.add_log(
                 f"STARTUP: Selective reverse enabled (min_move={SELECTIVE_REVERSE_MIN_MOVE_PCT:.3f}%)"
+            )
+        if SIGNAL_STRATEGY == "deterministic_momentum":
+            self.add_log(
+                f"STARTUP: Deterministic momentum enabled (min_move={DETERMINISTIC_MOMENTUM_MIN_MOVE_PCT:.3f}%)"
+            )
+        if SIGNAL_STRATEGY == "deterministic_confirmed":
+            self.add_log(
+                "STARTUP: Deterministic confirmed momentum enabled "
+                f"(min_move={DETERMINISTIC_CONFIRMED_MIN_MOVE_PCT:.3f}%, min_ticks={DETERMINISTIC_CONFIRMED_MIN_TICKS})"
             )
 
     @staticmethod
@@ -3165,10 +3188,39 @@ class ArenaState:
 
     def _apply_ollama_signal(self, name: str, desk_key: str, ollama_tag: str, ref_price: float) -> None:
         history = list(self.price_history)  # snapshot outside lock
-        action, err = _ollama_signal(ollama_tag, ref_price, desk_key, history)
-        if err:
-            self.add_log(f"{name} [{desk_key.upper()}]: LLM error — {err} (treated as HOLD)")
+        key = "btc" if desk_key == "btc" else "basket"
+        prices_seq = [h[key] for h in history if key in h]
+        move_pct = self._desk_recent_move_pct(desk_key)
+        entry_move_threshold = max(MIN_TRADE_MOVE_PCT, MIN_PROFIT_EDGE_PCT)
+        momentum_threshold = max(MOMENTUM_OVERRIDE_THRESHOLD_PCT, entry_move_threshold)
+        deterministic_threshold = max(DETERMINISTIC_MOMENTUM_MIN_MOVE_PCT, entry_move_threshold)
+        confirmed_threshold = max(DETERMINISTIC_CONFIRMED_MIN_MOVE_PCT, entry_move_threshold)
+
+        if SIGNAL_STRATEGY == "deterministic_momentum":
+            if move_pct >= deterministic_threshold:
+                action = 1
+            elif move_pct <= -deterministic_threshold:
+                action = -1
+            else:
+                action = 0
+            err = None
+        elif SIGNAL_STRATEGY == "deterministic_confirmed":
             action = 0
+            if len(prices_seq) >= DETERMINISTIC_CONFIRMED_MIN_TICKS + 1:
+                recent_changes = [
+                    prices_seq[idx] - prices_seq[idx - 1]
+                    for idx in range(len(prices_seq) - DETERMINISTIC_CONFIRMED_MIN_TICKS, len(prices_seq))
+                ]
+                if move_pct >= confirmed_threshold and all(change > 0 for change in recent_changes):
+                    action = 1
+                elif move_pct <= -confirmed_threshold and all(change < 0 for change in recent_changes):
+                    action = -1
+            err = None
+        else:
+            action, err = _ollama_signal(ollama_tag, ref_price, desk_key, history)
+            if err:
+                self.add_log(f"{name} [{desk_key.upper()}]: LLM error — {err} (treated as HOLD)")
+                action = 0
 
         selective_reverse_used = False
 
@@ -3176,9 +3228,6 @@ class ArenaState:
         if SIGNAL_STRATEGY == "reversal":
             action = -action  # Invert signal: LONG->SHORT, SHORT->LONG, HOLD->HOLD
 
-        move_pct = self._desk_recent_move_pct(desk_key)
-        entry_move_threshold = max(MIN_TRADE_MOVE_PCT, MIN_PROFIT_EDGE_PCT)
-        momentum_threshold = max(MOMENTUM_OVERRIDE_THRESHOLD_PCT, entry_move_threshold)
         # Flat-market gate: suppress directional signal if market isn't moving enough
         if action != 0:
             if abs(move_pct) < entry_move_threshold:
@@ -3275,6 +3324,14 @@ class ArenaState:
             if selective_reverse_used and side in {"LONG", "SHORT"}:
                 self.add_log(
                     f"{name} [{desk}]: selective reverse -> {side} (move={move_pct:+.4f}%)"
+                )
+            if SIGNAL_STRATEGY == "deterministic_momentum" and side in {"LONG", "SHORT"}:
+                self.add_log(
+                    f"{name} [{desk}]: deterministic momentum -> {side} (move={move_pct:+.4f}%)"
+                )
+            if SIGNAL_STRATEGY == "deterministic_confirmed" and side in {"LONG", "SHORT"}:
+                self.add_log(
+                    f"{name} [{desk}]: deterministic confirmed -> {side} (move={move_pct:+.4f}%, ticks={DETERMINISTIC_CONFIRMED_MIN_TICKS})"
                 )
             _log_movement({
                 "type":   "signal",
