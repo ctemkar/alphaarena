@@ -196,6 +196,12 @@ try:
 except ValueError:
     HOLD_COOLDOWN_TICKS = 12
 HOLD_CLOSES_POSITION = os.getenv("ALPHA_HOLD_CLOSES_POSITION", "0").strip().lower() in {"1", "true", "yes", "on"}
+PAPER_FORCE_CLOSE_ON_HOLD = os.getenv("ALPHA_PAPER_FORCE_CLOSE_ON_HOLD", "1").strip().lower() in {"1", "true", "yes", "on"}
+DISABLE_BASKET_TIMEOUT_FALLBACK = os.getenv("ALPHA_DISABLE_BASKET_TIMEOUT_FALLBACK", "1").strip().lower() in {"1", "true", "yes", "on"}
+try:
+    PAPER_RISK_OFF_MAX_DRAWDOWN_PCT = float(os.getenv("ALPHA_PAPER_RISK_OFF_MAX_DRAWDOWN_PCT", "0.20"))
+except ValueError:
+    PAPER_RISK_OFF_MAX_DRAWDOWN_PCT = 0.20
 SKIP_SELECTED_HOLD_ON_SIGNAL = os.getenv("ALPHA_SKIP_SELECTED_HOLD_ON_SIGNAL", "0").strip().lower() in {"1", "true", "yes", "on"}
 try:
     HOLD_SCORE_PENALTY = float(os.getenv("ALPHA_HOLD_SCORE_PENALTY", "8.0"))
@@ -1054,9 +1060,10 @@ class ArenaState:
         return total
 
     def _effective_portfolio_pnl(self) -> float:
+        if self.paper_mode:
+            # In paper mode, ledger totals are the source of truth.
+            return self._ledger_desk_total_pnl("btc", self.paper_ledger) + self._ledger_desk_total_pnl("basket", self.paper_ledger)
         if self.strict_no_simulation and self.live_trading:
-            if self.paper_mode:
-                return self._ledger_desk_total_pnl("btc", self.paper_ledger) + self._ledger_desk_total_pnl("basket", self.paper_ledger)
             if self.binance_pnl.get("available"):
                 return float(self.binance_pnl.get("equity_delta_usd", 0.0) or 0.0)
         return self._portfolio_pnl()
@@ -2045,13 +2052,32 @@ class ArenaState:
                 prices_seq = [h[key] for h in history if key in h]
                 raw_action = action
                 if err:
-                    with self.lock:
-                        self.add_log(
-                            f"{name} [{desk_key.upper()}]: LLM error — {err} "
-                            f"(provider={signal_provider}, arm={signal_arm}, using momentum fallback)"
+                    err_text = str(err)
+                    err_lower = err_text.lower()
+                    basket_timeout = (
+                        desk_key == "basket"
+                        and DISABLE_BASKET_TIMEOUT_FALLBACK
+                        and (
+                            "timeout" in err_lower
+                            or "gateway timeout" in err_lower
+                            or "timed out" in err_lower
                         )
+                    )
+                    with self.lock:
+                        if basket_timeout:
+                            self.add_log(
+                                f"{name} [{desk_key.upper()}]: LLM error — {err_text} "
+                                f"(provider={signal_provider}, arm={signal_arm}, timeout fallback disabled -> HOLD)"
+                            )
+                        else:
+                            self.add_log(
+                                f"{name} [{desk_key.upper()}]: LLM error — {err_text} "
+                                f"(provider={signal_provider}, arm={signal_arm}, using momentum fallback)"
+                            )
                     # Momentum-based fallback for errors: only go directional if move beats fee break-even
-                    if abs(move_pct) >= momentum_threshold:
+                    if basket_timeout:
+                        action = 0
+                    elif abs(move_pct) >= momentum_threshold:
                         if AI_FALLBACK_CONFIRMATION_ENABLED:
                             action = self._confirmed_directional_action(
                                 prices_seq,
@@ -2103,6 +2129,16 @@ class ArenaState:
                     if self.pause_all_desks or self.paused_desks.get(desk_key, False):
                         self.add_log(f"{name} [{desk_key.upper()}]: signal skipped (desk paused)")
                         continue
+                    forced_risk_off = False
+                    if self.paper_mode and PAPER_RISK_OFF_MAX_DRAWDOWN_PCT > 0.0:
+                        trade_side = str(slot.get("trade_side", "FLAT") or "FLAT")
+                        entry_price = float(slot.get("entry", 0.0) or 0.0)
+                        if trade_side in {"LONG", "SHORT"} and entry_price > 0.0:
+                            move_from_entry_pct = ((ref_price - entry_price) / entry_price) * 100.0
+                            adverse_move_pct = (-move_from_entry_pct) if trade_side == "LONG" else move_from_entry_pct
+                            if adverse_move_pct >= PAPER_RISK_OFF_MAX_DRAWDOWN_PCT:
+                                action = 0
+                                forced_risk_off = True
                     self._queue_raw_signal_eval_unlocked(name, desk_key, raw_action, ref_price, bool(err))
                     side = "LONG" if action == 1 else ("SHORT" if action == -1 else "HOLD")
                     if suppressed_by_move_gate:
@@ -2143,6 +2179,11 @@ class ArenaState:
                     slot["signal_source"] = "ai"
                     slot["last_signal"] = side
                     if side == "HOLD":
+                        if forced_risk_off:
+                            self.add_log(
+                                f"{name} [{desk_key.upper()}]: risk-off HOLD enforced "
+                                f"(adverse move exceeded {PAPER_RISK_OFF_MAX_DRAWDOWN_PCT:.3f}%)"
+                            )
                         desk_state = self.desk_direction_state.get(desk_key)
                         if desk_state and int(desk_state.get("cooldown_until_tick", 0)) <= self.tick_count:
                             desk_state["streak"] = max(0, int(desk_state.get("streak", 0)) - 1)
@@ -2158,6 +2199,17 @@ class ArenaState:
                         # In strict live mode, avoid simulated trade closes; real fills drive PnL.
                         if not (self.strict_no_simulation and self.live_trading):
                             self._close_trade_if_open(name, desk_key, slot, "hold_signal", ref_price)
+                        if PAPER_FORCE_CLOSE_ON_HOLD:
+                            closed_count = self._close_paper_ledger_positions_unlocked(
+                                name,
+                                desk_key,
+                                signal_arm,
+                                "hold_signal",
+                            )
+                            if closed_count > 0:
+                                self.add_log(
+                                    f"{name} [{desk_key.upper()}]: closed {closed_count} paper ledger position(s) on HOLD"
+                                )
                         slot["pos"] = 0.0
                         # Immediately trigger auto-select to replace this HOLD model
                         if self.auto_select_enabled and (
@@ -2656,6 +2708,44 @@ class ArenaState:
             slot["trade_side"] = new_side
             slot["trade_open_balance"] = slot["balance"]
 
+    def _close_paper_ledger_positions_unlocked(self, model_name: str, desk: str, signal_arm: str, reason: str) -> int:
+        if not self.paper_mode:
+            return 0
+        closed = 0
+        for symbol in self._desk_symbols(desk):
+            entry = self.paper_ledger.get((model_name, desk, symbol))
+            if not entry:
+                continue
+            open_qty = float(entry.get("open_qty", 0.0) or 0.0)
+            if abs(open_qty) <= 1e-12:
+                continue
+            price_key = _SYMBOL_PRICE_KEY.get(symbol, "btc")
+            mark_price = float(self.prices.get(price_key, 0.0) or 0.0)
+            if mark_price <= 0.0:
+                continue
+            close_side = "SHORT" if open_qty > 0 else "LONG"
+            self._record_paper_fill(
+                model_name,
+                desk,
+                symbol,
+                close_side,
+                mark_price,
+                abs(open_qty),
+                signal_arm,
+            )
+            _log_movement({
+                "type": "paper_close",
+                "model": model_name,
+                "desk": desk,
+                "symbol": symbol,
+                "reason": reason,
+                "side": close_side,
+                "qty": round(abs(open_qty), 8),
+                "price": round(mark_price, 4),
+            })
+            closed += 1
+        return closed
+
     def _reset_internal_slot_pnl_unlocked(self, slot: dict, ref_price: float) -> None:
         slot["balance"] = START_BALANCE
         slot["realized_pnl"] = 0.0
@@ -2985,6 +3075,7 @@ class ArenaState:
                 continue
             ref_price = self.prices["btc"] if d == "btc" else self.prices["basket"]
             self._close_trade_if_open(name, d, slot, "deselect", ref_price)
+            self._close_paper_ledger_positions_unlocked(name, d, "control", "deselect")
             slot["realized_pnl"] += slot["balance"] - START_BALANCE
             slot["selected"] = False
             slot["balance"] = START_BALANCE
@@ -3495,7 +3586,18 @@ class ArenaState:
     def snapshot(self) -> dict:
         with self.lock:
             strict_live_mode = self.strict_no_simulation and self.live_trading
-            if strict_live_mode:
+            if self.paper_mode:
+                # Paper mode should always report P&L from paper ledger to avoid
+                # slot-balance drift showing up when ledger is reset.
+                btc_pnl = self._ledger_desk_total_pnl("btc", ledger=self.paper_ledger)
+                basket_pnl = self._ledger_desk_total_pnl("basket", ledger=self.paper_ledger)
+                btc_fees = self._ledger_desk_total_fees("btc", ledger=self.paper_ledger)
+                basket_fees = self._ledger_desk_total_fees("basket", ledger=self.paper_ledger)
+                app_total_pnl = btc_pnl + basket_pnl
+                # Equity is not persisted in ledger mode; keep this non-authoritative.
+                btc_equity = 0.0
+                basket_equity = 0.0
+            elif strict_live_mode:
                 active_ledger = self.paper_ledger if self.paper_mode else self.live_ledger
                 # Strict mode P&L from active execution ledger (paper or live).
                 btc_pnl = self._ledger_desk_total_pnl("btc", ledger=active_ledger)
