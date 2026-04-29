@@ -2066,8 +2066,8 @@ class ArenaState:
                 action, err = _ollama_signal(resolved_tag, ref_price, desk_key, history)
                 latency_ms = (time.perf_counter() - started) * 1000.0
                 move_pct = self._desk_recent_move_pct(desk_key)
-                entry_move_threshold = max(MIN_TRADE_MOVE_PCT, MIN_PROFIT_EDGE_PCT)
-                momentum_threshold = max(MOMENTUM_OVERRIDE_THRESHOLD_PCT, entry_move_threshold)
+                entry_move_threshold = self._desk_entry_move_threshold_pct(desk_key)
+                momentum_threshold = max(self._desk_momentum_override_threshold_pct(desk_key), entry_move_threshold)
                 key = "btc" if desk_key == "btc" else "basket"
                 prices_seq = [h[key] for h in history if key in h]
                 raw_action = action
@@ -2130,10 +2130,11 @@ class ArenaState:
                 # Guardrail: do not take directional entries that directly conflict with
                 # current desk momentum direction beyond the same override threshold.
                 suppressed_by_trend_conflict = False
-                if action == 1 and move_pct <= -MOMENTUM_OVERRIDE_THRESHOLD_PCT:
+                desk_momentum_threshold = self._desk_momentum_override_threshold_pct(desk_key)
+                if action == 1 and move_pct <= -desk_momentum_threshold:
                     action = 0
                     suppressed_by_trend_conflict = True
-                elif action == -1 and move_pct >= MOMENTUM_OVERRIDE_THRESHOLD_PCT:
+                elif action == -1 and move_pct >= desk_momentum_threshold:
                     action = 0
                     suppressed_by_trend_conflict = True
                 
@@ -2984,11 +2985,15 @@ class ArenaState:
     def _score_pending_raw_signals_unlocked(self) -> None:
         if not self.pending_raw_signal_evals:
             return
-        hold_flat_threshold = max(MIN_TRADE_MOVE_PCT, MIN_PROFIT_EDGE_PCT, MOMENTUM_OVERRIDE_THRESHOLD_PCT)
         pending = self.pending_raw_signal_evals
         self.pending_raw_signal_evals = []
         for item in pending:
             desk = str(item.get("desk") or "btc")
+            hold_flat_threshold = max(
+                MIN_TRADE_MOVE_PCT,
+                self._desk_min_profit_edge_pct(desk),
+                self._desk_momentum_override_threshold_pct(desk),
+            )
             signal_price = float(item.get("price", 0.0) or 0.0)
             current_price = float(self.prices.get("btc" if desk == "btc" else "basket", 0.0) or 0.0)
             if signal_price <= 0.0 or current_price <= 0.0:
@@ -3454,8 +3459,8 @@ class ArenaState:
         key = "btc" if desk_key == "btc" else "basket"
         prices_seq = [h[key] for h in history if key in h]
         move_pct = self._desk_recent_move_pct(desk_key)
-        entry_move_threshold = max(MIN_TRADE_MOVE_PCT, MIN_PROFIT_EDGE_PCT)
-        momentum_threshold = max(MOMENTUM_OVERRIDE_THRESHOLD_PCT, entry_move_threshold)
+        entry_move_threshold = self._desk_entry_move_threshold_pct(desk_key)
+        momentum_threshold = max(self._desk_momentum_override_threshold_pct(desk_key), entry_move_threshold)
         deterministic_threshold = max(DETERMINISTIC_MOMENTUM_MIN_MOVE_PCT, entry_move_threshold)
         confirmed_threshold = max(DETERMINISTIC_CONFIRMED_MIN_MOVE_PCT, entry_move_threshold)
 
@@ -3498,7 +3503,7 @@ class ArenaState:
 
         selective_reverse_threshold = max(
             SELECTIVE_REVERSE_MIN_MOVE_PCT,
-            MOMENTUM_OVERRIDE_THRESHOLD_PCT,
+            self._desk_momentum_override_threshold_pct(desk_key),
             entry_move_threshold,
         )
         if SIGNAL_STRATEGY == "selective_reverse" and action != 0:
@@ -3515,7 +3520,7 @@ class ArenaState:
         elif SIGNAL_STRATEGY == "selective_reverse":
             trend_threshold = selective_reverse_threshold
         else:
-            trend_threshold = MOMENTUM_OVERRIDE_THRESHOLD_PCT
+            trend_threshold = self._desk_momentum_override_threshold_pct(desk_key)
 
         # Guardrail: suppress entries that directly oppose current desk momentum direction.
         if action == 1 and move_pct <= -trend_threshold:
