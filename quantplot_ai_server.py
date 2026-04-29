@@ -305,6 +305,40 @@ try:
 except ValueError:
     DIRECTIONAL_STREAK_STRONG_MOVE_PCT = 0.06
 
+try:
+    DIRECTIONAL_PERSISTENCE_MIN_STREAK = int(os.getenv("ALPHA_DIRECTIONAL_PERSISTENCE_MIN_STREAK", "1"))
+except ValueError:
+    DIRECTIONAL_PERSISTENCE_MIN_STREAK = 1
+try:
+    DIRECTIONAL_PERSISTENCE_MIN_STREAK_BTC = int(
+        os.getenv("ALPHA_DIRECTIONAL_PERSISTENCE_MIN_STREAK_BTC", str(DIRECTIONAL_PERSISTENCE_MIN_STREAK))
+    )
+except ValueError:
+    DIRECTIONAL_PERSISTENCE_MIN_STREAK_BTC = DIRECTIONAL_PERSISTENCE_MIN_STREAK
+try:
+    DIRECTIONAL_PERSISTENCE_MIN_STREAK_BASKET = int(
+        os.getenv("ALPHA_DIRECTIONAL_PERSISTENCE_MIN_STREAK_BASKET", str(DIRECTIONAL_PERSISTENCE_MIN_STREAK))
+    )
+except ValueError:
+    DIRECTIONAL_PERSISTENCE_MIN_STREAK_BASKET = DIRECTIONAL_PERSISTENCE_MIN_STREAK
+
+try:
+    REVERSAL_EDGE_MULTIPLIER = float(os.getenv("ALPHA_REVERSAL_EDGE_MULTIPLIER", "1.0"))
+except ValueError:
+    REVERSAL_EDGE_MULTIPLIER = 1.0
+try:
+    REVERSAL_EDGE_MULTIPLIER_BTC = float(
+        os.getenv("ALPHA_REVERSAL_EDGE_MULTIPLIER_BTC", str(REVERSAL_EDGE_MULTIPLIER))
+    )
+except ValueError:
+    REVERSAL_EDGE_MULTIPLIER_BTC = REVERSAL_EDGE_MULTIPLIER
+try:
+    REVERSAL_EDGE_MULTIPLIER_BASKET = float(
+        os.getenv("ALPHA_REVERSAL_EDGE_MULTIPLIER_BASKET", str(REVERSAL_EDGE_MULTIPLIER))
+    )
+except ValueError:
+    REVERSAL_EDGE_MULTIPLIER_BASKET = REVERSAL_EDGE_MULTIPLIER
+
 # Strategy selection for signal filtering:
 # 'trend_filter' (default) = Strict trend filtering (rejects counter-trend signals)
 # 'simple_prompt' = Simplified prompt (basic momentum only, no complex context)
@@ -1027,6 +1061,8 @@ class ArenaState:
                     slot["hold_streak"] = 0
                     slot["hold_signals"] = 0
                     slot["directional_signals"] = 0
+                    slot["directional_candidate_side"] = "HOLD"
+                    slot["directional_candidate_streak"] = 0
                     slot["trade_side"] = "FLAT"
                     slot["trade_open_balance"] = START_BALANCE
 
@@ -2160,6 +2196,18 @@ class ArenaState:
                             if adverse_move_pct >= PAPER_RISK_OFF_MAX_DRAWDOWN_PCT:
                                 action = 0
                                 forced_risk_off = True
+                    action, suppressed_by_persistence, persistence_streak, persistence_needed = self._apply_directional_persistence_gate_unlocked(
+                        slot,
+                        desk_key,
+                        action,
+                    )
+                    action, suppressed_by_reversal_gate, reversal_threshold = self._apply_reversal_asymmetry_gate_unlocked(
+                        slot,
+                        desk_key,
+                        action,
+                        move_pct,
+                        entry_move_threshold,
+                    )
                     self._queue_raw_signal_eval_unlocked(name, desk_key, raw_action, ref_price, bool(err))
                     side = "LONG" if action == 1 else ("SHORT" if action == -1 else "HOLD")
                     if suppressed_by_move_gate:
@@ -2171,6 +2219,16 @@ class ArenaState:
                         self.add_log(
                             f"{name} [{desk_key.upper()}]: directional signal suppressed "
                             f"(signal conflicts with move {move_pct:+.4f}% trend)"
+                        )
+                    if suppressed_by_persistence:
+                        self.add_log(
+                            f"{name} [{desk_key.upper()}]: directional signal deferred "
+                            f"(persistence {persistence_streak}/{persistence_needed})"
+                        )
+                    if suppressed_by_reversal_gate:
+                        self.add_log(
+                            f"{name} [{desk_key.upper()}]: reversal signal suppressed "
+                            f"(move {move_pct:+.4f}% < reversal gate {reversal_threshold:.4f}%)"
                         )
                     hard_live_block = (
                         (not self.paper_mode)
@@ -2217,6 +2275,8 @@ class ArenaState:
                                 self.tick_count + self.hold_cooldown_ticks,
                             )
                         slot["hold_signals"] = int(slot.get("hold_signals", 0)) + 1
+                        slot["directional_candidate_side"] = "HOLD"
+                        slot["directional_candidate_streak"] = 0
                         # In strict live mode, avoid simulated trade closes; real fills drive PnL.
                         if not (self.strict_no_simulation and self.live_trading):
                             self._close_trade_if_open(name, desk_key, slot, "hold_signal", ref_price)
@@ -2669,6 +2729,8 @@ class ArenaState:
             "hold_cooldown_until_tick": 0,
             "hold_signals": 0,
             "directional_signals": 0,
+            "directional_candidate_side": "HOLD",
+            "directional_candidate_streak": 0,
             "trade_side": "FLAT",    # FLAT | LONG | SHORT
             "trade_open_balance": START_BALANCE,
         }
@@ -2873,6 +2935,61 @@ class ArenaState:
 
     def _desk_entry_move_threshold_pct(self, desk: str) -> float:
         return max(MIN_TRADE_MOVE_PCT, self._desk_min_profit_edge_pct(desk))
+
+    def _desk_directional_persistence_min_streak(self, desk: str) -> int:
+        return (
+            max(1, DIRECTIONAL_PERSISTENCE_MIN_STREAK_BTC)
+            if desk == "btc"
+            else max(1, DIRECTIONAL_PERSISTENCE_MIN_STREAK_BASKET)
+        )
+
+    def _desk_reversal_edge_multiplier(self, desk: str) -> float:
+        return (
+            max(1.0, REVERSAL_EDGE_MULTIPLIER_BTC)
+            if desk == "btc"
+            else max(1.0, REVERSAL_EDGE_MULTIPLIER_BASKET)
+        )
+
+    def _apply_directional_persistence_gate_unlocked(self, slot: dict, desk: str, action: int) -> tuple[int, bool, int, int]:
+        min_streak = self._desk_directional_persistence_min_streak(desk)
+        if action == 0:
+            slot["directional_candidate_side"] = "HOLD"
+            slot["directional_candidate_streak"] = 0
+            return 0, False, 0, min_streak
+        if min_streak <= 1:
+            return action, False, min_streak, min_streak
+
+        candidate_side = "LONG" if action > 0 else "SHORT"
+        prev_side = str(slot.get("directional_candidate_side", "HOLD") or "HOLD")
+        prev_streak = int(slot.get("directional_candidate_streak", 0) or 0)
+        current_streak = prev_streak + 1 if prev_side == candidate_side else 1
+        slot["directional_candidate_side"] = candidate_side
+        slot["directional_candidate_streak"] = current_streak
+
+        if current_streak < min_streak:
+            return 0, True, current_streak, min_streak
+        return action, False, current_streak, min_streak
+
+    def _apply_reversal_asymmetry_gate_unlocked(
+        self,
+        slot: dict,
+        desk: str,
+        action: int,
+        move_pct: float,
+        entry_move_threshold: float,
+    ) -> tuple[int, bool, float]:
+        if action == 0:
+            return 0, False, 0.0
+        trade_side = str(slot.get("trade_side", "FLAT") or "FLAT")
+        signal_side = "LONG" if action > 0 else "SHORT"
+        is_reversal = trade_side in {"LONG", "SHORT"} and trade_side != signal_side
+        if not is_reversal:
+            return action, False, 0.0
+
+        reversal_threshold = entry_move_threshold * self._desk_reversal_edge_multiplier(desk)
+        if abs(move_pct) < reversal_threshold:
+            return 0, True, reversal_threshold
+        return action, False, reversal_threshold
 
     def _is_aggressive_movement(self, desk: str) -> bool:
         if not self.aggressive_movement_enabled:
@@ -3549,6 +3666,19 @@ class ArenaState:
                 action = 1 if move_pct > 0 else -1
                 hold_override_used = True
 
+            action, suppressed_by_persistence, persistence_streak, persistence_needed = self._apply_directional_persistence_gate_unlocked(
+                slot,
+                desk_key,
+                action,
+            )
+            action, suppressed_by_reversal_gate, reversal_threshold = self._apply_reversal_asymmetry_gate_unlocked(
+                slot,
+                desk_key,
+                action,
+                move_pct,
+                entry_move_threshold,
+            )
+
             side = "LONG" if action == 1 else ("SHORT" if action == -1 else "HOLD")
             hard_live_block = (
                 (not self.paper_mode)
@@ -3573,6 +3703,8 @@ class ArenaState:
                 if HOLD_CLOSES_POSITION:
                     self._close_trade_if_open(name, desk_key, slot, "hold_signal", ref_price)
                     slot["pos"] = 0.0
+                slot["directional_candidate_side"] = "HOLD"
+                slot["directional_candidate_streak"] = 0
                 slot["mark_price"] = ref_price
             else:
                 slot["hold_streak"] = 0
@@ -3585,6 +3717,14 @@ class ArenaState:
             desk = desk_key.upper()
             live_side = side
             self.add_log(f"{name} [{desk}]: {side} @ ${ref_price:,.2f} [AI]")
+            if suppressed_by_persistence:
+                self.add_log(
+                    f"{name} [{desk}]: directional signal deferred (persistence {persistence_streak}/{persistence_needed})"
+                )
+            if suppressed_by_reversal_gate:
+                self.add_log(
+                    f"{name} [{desk}]: reversal signal suppressed (move {move_pct:+.4f}% < reversal gate {reversal_threshold:.4f}%)"
+                )
             if hold_override_used and side in {"LONG", "SHORT"}:
                 self.add_log(
                     f"{name} [{desk}]: HOLD override -> {side} (hold_streak={int(slot.get('hold_streak', 0))}, move={move_pct:+.4f}%)"
