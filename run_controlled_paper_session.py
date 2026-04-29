@@ -7,6 +7,10 @@ import urllib.request
 BASE = "http://127.0.0.1:8000"
 DURATION_SECONDS = int(os.getenv("ALPHA_CONTROLLED_DURATION_SECONDS", "240"))
 POLL_SECONDS = int(os.getenv("ALPHA_CONTROLLED_POLL_SECONDS", "10"))
+BTC_MODEL = os.getenv("ALPHA_CONTROLLED_BTC_MODEL", "Qwen-2.5").strip()
+BASKET_MODEL = os.getenv("ALPHA_CONTROLLED_BASKET_MODEL", "DeepSeek-R1").strip()
+ENABLE_BTC = os.getenv("ALPHA_CONTROLLED_ENABLE_BTC", "1").strip().lower() in {"1", "true", "yes", "on"}
+ENABLE_BASKET = os.getenv("ALPHA_CONTROLLED_ENABLE_BASKET", "1").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def post(path: str, payload: dict) -> tuple[int, dict]:
@@ -31,11 +35,14 @@ def tail(state: dict, desk: str) -> str:
 
 def summarize(state: dict) -> dict:
     ps = state.get("paper_summary") or {}
+    desk_pnl = state.get("desk_pnl") or {}
     return {
         "ts": state.get("ts"),
         "net_pnl": float(state.get("app_total_pnl_usd", 0.0) or 0.0),
         "ex_fee_pnl": float(state.get("app_total_pnl_excl_fees_usd", 0.0) or 0.0),
         "fee_drag": float((state.get("app_total_pnl_excl_fees_usd", 0.0) or 0.0) - (state.get("app_total_pnl_usd", 0.0) or 0.0)),
+        "btc_pnl": float(desk_pnl.get("btc", 0.0) or 0.0),
+        "basket_pnl": float(desk_pnl.get("basket", 0.0) or 0.0),
         "trades": int(ps.get("trades", 0) or 0),
         "wins": int(ps.get("wins", 0) or 0),
         "losses": int(ps.get("losses", 0) or 0),
@@ -52,8 +59,14 @@ def main() -> None:
     print("prep", post("/api/paper-mode", {"enabled": True}))
     print("prep", post("/api/auto-select", {"enabled": False}))
     print("prep", post("/api/desks/clear", {}))
-    print("prep", post("/api/select", {"model": "Qwen-2.5", "desk": "btc"}))
-    print("prep", post("/api/select", {"model": "DeepSeek-R1", "desk": "basket"}))
+    if ENABLE_BTC and BTC_MODEL:
+        print("prep", post("/api/select", {"model": BTC_MODEL, "desk": "btc"}))
+    else:
+        print("prep", {"skip": "btc selection disabled"})
+    if ENABLE_BASKET and BASKET_MODEL:
+        print("prep", post("/api/select", {"model": BASKET_MODEL, "desk": "basket"}))
+    else:
+        print("prep", {"skip": "basket selection disabled"})
 
     start_state = get_state()
     start = summarize(start_state)
@@ -77,6 +90,7 @@ def main() -> None:
             changes.append("basket_log")
         if changes:
             print(f"[{cur['ts']}] net={cur['net_pnl']:+.2f} ex_fee={cur['ex_fee_pnl']:+.2f} "
+                  f"btc={cur['btc_pnl']:+.2f} bsk={cur['basket_pnl']:+.2f} "
                   f"trades={cur['trades']} changes={','.join(changes)}")
             print("  BTC:", cur["btc_last"][-120:])
             print("  BSK:", cur["basket_last"][-120:])

@@ -123,6 +123,14 @@ try:
     MIN_PROFIT_EDGE_PCT = float(os.getenv("ALPHA_MIN_PROFIT_EDGE_PCT", "0.08"))
 except ValueError:
     MIN_PROFIT_EDGE_PCT = 0.08
+try:
+    MIN_PROFIT_EDGE_PCT_BTC = float(os.getenv("ALPHA_MIN_PROFIT_EDGE_PCT_BTC", str(MIN_PROFIT_EDGE_PCT)))
+except ValueError:
+    MIN_PROFIT_EDGE_PCT_BTC = MIN_PROFIT_EDGE_PCT
+try:
+    MIN_PROFIT_EDGE_PCT_BASKET = float(os.getenv("ALPHA_MIN_PROFIT_EDGE_PCT_BASKET", str(MIN_PROFIT_EDGE_PCT)))
+except ValueError:
+    MIN_PROFIT_EDGE_PCT_BASKET = MIN_PROFIT_EDGE_PCT
 
 try:
     LIVE_ORDER_USD = float(os.getenv("ALPHA_LIVE_ORDER_USD", "80"))
@@ -265,6 +273,18 @@ try:
     MOMENTUM_OVERRIDE_THRESHOLD_PCT = float(os.getenv("ALPHA_MOMENTUM_OVERRIDE_THRESHOLD_PCT", "0.02"))
 except ValueError:
     MOMENTUM_OVERRIDE_THRESHOLD_PCT = 0.02
+try:
+    MOMENTUM_OVERRIDE_THRESHOLD_PCT_BTC = float(
+        os.getenv("ALPHA_MOMENTUM_OVERRIDE_THRESHOLD_PCT_BTC", str(MOMENTUM_OVERRIDE_THRESHOLD_PCT))
+    )
+except ValueError:
+    MOMENTUM_OVERRIDE_THRESHOLD_PCT_BTC = MOMENTUM_OVERRIDE_THRESHOLD_PCT
+try:
+    MOMENTUM_OVERRIDE_THRESHOLD_PCT_BASKET = float(
+        os.getenv("ALPHA_MOMENTUM_OVERRIDE_THRESHOLD_PCT_BASKET", str(MOMENTUM_OVERRIDE_THRESHOLD_PCT))
+    )
+except ValueError:
+    MOMENTUM_OVERRIDE_THRESHOLD_PCT_BASKET = MOMENTUM_OVERRIDE_THRESHOLD_PCT
 
 HOLD_STREAK_MOMENTUM_OVERRIDE_ENABLED = os.getenv("ALPHA_HOLD_STREAK_MOMENTUM_OVERRIDE_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
 try:
@@ -2843,6 +2863,15 @@ class ArenaState:
         if not oldest:
             return 0.0
         return ((latest - oldest) / oldest) * 100.0
+
+    def _desk_min_profit_edge_pct(self, desk: str) -> float:
+        return MIN_PROFIT_EDGE_PCT_BTC if desk == "btc" else MIN_PROFIT_EDGE_PCT_BASKET
+
+    def _desk_momentum_override_threshold_pct(self, desk: str) -> float:
+        return MOMENTUM_OVERRIDE_THRESHOLD_PCT_BTC if desk == "btc" else MOMENTUM_OVERRIDE_THRESHOLD_PCT_BASKET
+
+    def _desk_entry_move_threshold_pct(self, desk: str) -> float:
+        return max(MIN_TRADE_MOVE_PCT, self._desk_min_profit_edge_pct(desk))
 
     def _is_aggressive_movement(self, desk: str) -> bool:
         if not self.aggressive_movement_enabled:
