@@ -4,7 +4,8 @@ import os
 import time
 import urllib.request
 
-BASE = "http://127.0.0.1:8000"
+PORT = int(os.getenv("ALPHA_CONTROLLED_PORT", "8000"))
+BASE = f"http://127.0.0.1:{PORT}"
 DURATION_SECONDS = int(os.getenv("ALPHA_CONTROLLED_DURATION_SECONDS", "240"))
 POLL_SECONDS = int(os.getenv("ALPHA_CONTROLLED_POLL_SECONDS", "10"))
 BTC_MODEL = os.getenv("ALPHA_CONTROLLED_BTC_MODEL", "Qwen-2.5").strip()

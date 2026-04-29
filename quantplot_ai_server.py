@@ -23,7 +23,10 @@ from pathlib import Path
 from execution_core import ExecutionCore, SignalRequest
 
 HOST = "127.0.0.1"
-PORT = 8000
+try:
+    PORT = int(os.getenv("ALPHA_PORT", "8000"))
+except (ValueError, TypeError):
+    PORT = 8000
 START_BALANCE = 10_000.0
 MAX_LOGS = 60
 MAX_MESSAGE_CENTER = 30
