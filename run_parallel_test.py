@@ -16,34 +16,34 @@ from pathlib import Path
 
 VARIANTS = [
     {
-        "name": "VARIANT-A (edge=0.055 size=50)",
+        "name": "VARIANT-A (edge=0.055 size=50 NO force-close)",
         "port": 8001,
         "model": "Llama-3.2",
         "edge": 0.055,
         "persistence": 1,
         "reversal": 1.3,
         "size_usd": 50,
-        "force_close_on_hold": "1",
+        "force_close_on_hold": "0",
     },
     {
-        "name": "VARIANT-B (edge=0.055 size=100)",
+        "name": "VARIANT-B (edge=0.055 size=100 NO force-close)",
         "port": 8002,
         "model": "Llama-3.2",
         "edge": 0.055,
         "persistence": 1,
         "reversal": 1.3,
         "size_usd": 100,
-        "force_close_on_hold": "1",
+        "force_close_on_hold": "0",
     },
     {
-        "name": "VARIANT-C (edge=0.055 size=200)",
+        "name": "VARIANT-C (edge=0.055 size=200 NO force-close)",
         "port": 8003,
         "model": "Llama-3.2",
         "edge": 0.055,
         "persistence": 1,
         "reversal": 1.3,
         "size_usd": 200,
-        "force_close_on_hold": "1",
+        "force_close_on_hold": "0",
     },
 ]
 
