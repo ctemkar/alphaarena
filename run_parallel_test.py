@@ -124,6 +124,8 @@ def start_server(v: dict) -> subprocess.Popen:
         "ALPHA_DETERMINISTIC_MOVE_WINDOW": str(v.get("det_move_window", "20")),
         "ALPHA_DISABLE_BASKET_TIMEOUT_FALLBACK": "1",
         "ALPHA_PAPER_RISK_OFF_MAX_DRAWDOWN_PCT": "0.20",
+        # Deterministic strategies re-evaluate every tick — don't block re-entry for 12 ticks after a HOLD.
+        "ALPHA_HOLD_COOLDOWN_TICKS": "2" if v.get("signal_strategy", "").startswith("deterministic") else "12",
     })
     proc = subprocess.Popen(
         ["python3", "quantplot_ai_server.py"],
