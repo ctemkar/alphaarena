@@ -57,6 +57,21 @@ VARIANTS = [
         "momentum_threshold": 0.005,
         "signal_strategy": "deterministic_momentum",
     },
+    {
+        "name": "VARIANT-V4 (det_mom BTC move=0.005 p=1 rev=1.6 size=150)",
+        "port": 8004,
+        "model": "Llama-3.2",
+        "desk": "btc",
+        "edge": 0.005,
+        "persistence": 1,
+        "reversal": 1.6,
+        "size_usd": 150,
+        "force_close_on_hold": "0",
+        "signal_chance": 1.0,
+        "momentum_override": "0",
+        "momentum_threshold": 0.005,
+        "signal_strategy": "deterministic_momentum",
+    },
 ]
 
 DURATION = int(os.getenv("ALPHA_PARALLEL_DURATION", "3600"))
@@ -87,15 +102,18 @@ def start_server(v: dict) -> subprocess.Popen:
         "ALPHA_CANARY_ENABLED": "0",
         "ALPHA_BASE_SIGNAL_CHANCE": str(v.get("signal_chance", "1.0")),
         "ALPHA_MIN_PROFIT_EDGE_PCT": "0.03",
-        "ALPHA_MIN_PROFIT_EDGE_PCT_BTC": "0.05",
-        # For deterministic strategies the signal threshold is set separately;
-        # zero out the edge gate so it doesn't swallow the action.
+        # Zero out per-desk edge gate for deterministic strategies; threshold is the sole gate.
+        "ALPHA_MIN_PROFIT_EDGE_PCT_BTC": "0.0" if v.get("signal_strategy", "").startswith("deterministic") else "0.05",
         "ALPHA_MIN_PROFIT_EDGE_PCT_BASKET": "0.0" if v.get("signal_strategy", "").startswith("deterministic") else str(v["edge"]),
         "ALPHA_MIN_TRADE_MOVE_PCT": "0.0",
         "ALPHA_MOMENTUM_OVERRIDE_THRESHOLD_PCT_BASKET": str(v.get("momentum_threshold", v["edge"])),
+        "ALPHA_MOMENTUM_OVERRIDE_THRESHOLD_PCT_BTC": str(v.get("momentum_threshold", v["edge"])),
         "ALPHA_DIRECTIONAL_PERSISTENCE_MIN_STREAK_BASKET": str(v["persistence"]),
+        "ALPHA_DIRECTIONAL_PERSISTENCE_MIN_STREAK_BTC": str(v["persistence"]),
         "ALPHA_REVERSAL_EDGE_MULTIPLIER_BASKET": str(v["reversal"]),
+        "ALPHA_REVERSAL_EDGE_MULTIPLIER_BTC": str(v["reversal"]),
         "ALPHA_BASKET_ORDER_USD": str(v["size_usd"]),
+        "ALPHA_BTC_ORDER_USD": str(v["size_usd"]),
         "ALPHA_HOLD_STREAK_MOMENTUM_OVERRIDE_ENABLED": v.get("momentum_override", "1"),
         "ALPHA_PAPER_FORCE_CLOSE_ON_HOLD": v.get("force_close_on_hold", "1"),
         "ALPHA_SIGNAL_STRATEGY": v.get("signal_strategy", ""),
@@ -117,13 +135,15 @@ def start_server(v: dict) -> subprocess.Popen:
 
 def run_harness(v: dict, result_store: dict) -> None:
     env = os.environ.copy()
+    desk = v.get("desk", "basket")
     env.update({
         "ALPHA_CONTROLLED_PORT": str(v["port"]),
         "ALPHA_CONTROLLED_DURATION_SECONDS": str(DURATION),
         "ALPHA_CONTROLLED_POLL_SECONDS": "15",
-        "ALPHA_CONTROLLED_ENABLE_BTC": "0",
-        "ALPHA_CONTROLLED_ENABLE_BASKET": "1",
-        "ALPHA_CONTROLLED_BASKET_MODEL": v["model"],
+        "ALPHA_CONTROLLED_ENABLE_BTC": "1" if desk == "btc" else "0",
+        "ALPHA_CONTROLLED_ENABLE_BASKET": "0" if desk == "btc" else "1",
+        "ALPHA_CONTROLLED_BTC_MODEL": v["model"] if desk == "btc" else "",
+        "ALPHA_CONTROLLED_BASKET_MODEL": v["model"] if desk != "btc" else "",
     })
     log_path = f"/tmp/alpha_harness_{v['port']}.log"
     print(f"  [{v['name']}] harness started → {log_path}")
