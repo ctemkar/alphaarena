@@ -16,29 +16,10 @@ from pathlib import Path
 
 VARIANTS = [
     # V1: Basket momentum — threshold well above 0.20% round-trip fee floor
-    # V1: BASKET reversal 0.030% WITH regime filter (×4 = skip when 60-tick trend > 0.12%)
-    # Sweep 2 showed this config wins 34.8% in choppy markets; sweep 3 showed 0% when trending.
-    # Regime filter should block trades during trending phases.
+    # 60-min endurance run: BASKET reversal 0.045% with regime filter (sweep 4 winner)
     {
-        "name": "VARIANT-V1 (det_reversal BASKET 0.030 regime_filter size=5000)",
+        "name": "VARIANT-V1 (det_reversal BASKET 0.045 regime_filter size=5000)",
         "port": 8001,
-        "model": "Llama-3.2",
-        "desk": "basket",
-        "edge": 0.030,
-        "persistence": 1,
-        "reversal": 1.6,
-        "size_usd": 5000,
-        "force_close_on_hold": "0",
-        "signal_chance": 1.0,
-        "momentum_override": "0",
-        "momentum_threshold": 0.030,
-        "signal_strategy": "deterministic_reversal",
-        "det_move_window": "20",
-    },
-    # V2: BASKET reversal 0.045% with regime filter — less noise than 0.030%, each signal stronger
-    {
-        "name": "VARIANT-V2 (det_reversal BASKET 0.045 regime_filter size=5000)",
-        "port": 8002,
         "model": "Llama-3.2",
         "desk": "basket",
         "edge": 0.045,
@@ -51,11 +32,12 @@ VARIANTS = [
         "momentum_threshold": 0.045,
         "signal_strategy": "deterministic_reversal",
         "det_move_window": "20",
+        "regime_filter": "1",
     },
-    # V3: BTC reversal 0.030% with regime filter — BTC is more volatile, filter should help
+    # BTC reversal 0.030% with regime filter (showed +$0.94 ex-fee, want to see over longer horizon)
     {
-        "name": "VARIANT-V3 (det_reversal BTC 0.030 regime_filter size=5000)",
-        "port": 8003,
+        "name": "VARIANT-V2 (det_reversal BTC 0.030 regime_filter size=5000)",
+        "port": 8002,
         "model": "Llama-3.2",
         "desk": "btc",
         "edge": 0.030,
@@ -68,24 +50,7 @@ VARIANTS = [
         "momentum_threshold": 0.030,
         "signal_strategy": "deterministic_reversal",
         "det_move_window": "20",
-    },
-    # V4: BASKET reversal 0.030% baseline WITHOUT regime filter — control group for comparison
-    {
-        "name": "VARIANT-V4 (det_reversal BASKET 0.030 NO_filter size=5000)",
-        "port": 8004,
-        "model": "Llama-3.2",
-        "desk": "basket",
-        "edge": 0.030,
-        "persistence": 1,
-        "reversal": 1.6,
-        "size_usd": 5000,
-        "force_close_on_hold": "0",
-        "signal_chance": 1.0,
-        "momentum_override": "0",
-        "momentum_threshold": 0.030,
-        "signal_strategy": "deterministic_reversal",
-        "det_move_window": "20",
-        "regime_filter": "0",
+        "regime_filter": "1",
     },
 ]
 
