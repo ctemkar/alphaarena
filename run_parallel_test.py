@@ -16,73 +16,73 @@ from pathlib import Path
 
 VARIANTS = [
     # V1: Basket momentum — threshold well above 0.20% round-trip fee floor
-    # V1: Basket MOMENTUM ride — enter on move, hold through HOLDs, exit on reversal
+    # V1: Basket MOMENTUM ride — enter on move, hold through HOLDs, exit on signal flip
     # force_close_on_hold=0: positions ride the wave instead of cutting immediately on HOLD
     {
-        "name": "VARIANT-V1 (det_mom BASKET move=0.10 ride size=500)",
+        "name": "VARIANT-V1 (det_mom BASKET move=0.030 ride size=500)",
         "port": 8001,
         "model": "Llama-3.2",
         "desk": "basket",
-        "edge": 0.10,
+        "edge": 0.030,
         "persistence": 1,
         "reversal": 1.6,
         "size_usd": 500,
         "force_close_on_hold": "0",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.10,
+        "momentum_threshold": 0.030,
         "signal_strategy": "deterministic_momentum",
         "det_move_window": "20",
     },
-    # V2: Basket REVERSAL — bet price mean-reverts after a 0.10% move, hold until opposite signal
+    # V2: Basket REVERSAL — bet price mean-reverts after a 0.030% move
     {
-        "name": "VARIANT-V2 (det_reversal BASKET move=0.10 size=500)",
+        "name": "VARIANT-V2 (det_reversal BASKET move=0.030 size=500)",
         "port": 8002,
         "model": "Llama-3.2",
         "desk": "basket",
-        "edge": 0.10,
+        "edge": 0.030,
         "persistence": 1,
         "reversal": 1.6,
         "size_usd": 500,
         "force_close_on_hold": "0",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.10,
-        "signal_strategy": "reversal",
+        "momentum_threshold": 0.030,
+        "signal_strategy": "deterministic_reversal",
         "det_move_window": "20",
     },
-    # V3: BTC MOMENTUM ride — stronger threshold (BTC more volatile)
+    # V3: BTC MOMENTUM ride — 0.030% threshold
     {
-        "name": "VARIANT-V3 (det_mom BTC move=0.12 ride size=500)",
+        "name": "VARIANT-V3 (det_mom BTC move=0.030 ride size=500)",
         "port": 8003,
         "model": "Llama-3.2",
         "desk": "btc",
-        "edge": 0.12,
+        "edge": 0.030,
         "persistence": 1,
         "reversal": 1.6,
         "size_usd": 500,
         "force_close_on_hold": "0",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.12,
+        "momentum_threshold": 0.030,
         "signal_strategy": "deterministic_momentum",
         "det_move_window": "20",
     },
-    # V4: BTC REVERSAL — bet BTC mean-reverts after 0.12% swing
+    # V4: BTC REVERSAL — bet BTC mean-reverts after 0.030% swing
     {
-        "name": "VARIANT-V4 (det_reversal BTC move=0.12 size=500)",
+        "name": "VARIANT-V4 (det_reversal BTC move=0.030 size=500)",
         "port": 8004,
         "model": "Llama-3.2",
         "desk": "btc",
-        "edge": 0.12,
+        "edge": 0.030,
         "persistence": 1,
         "reversal": 1.6,
         "size_usd": 500,
         "force_close_on_hold": "0",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.12,
-        "signal_strategy": "reversal",
+        "momentum_threshold": 0.030,
+        "signal_strategy": "deterministic_reversal",
         "det_move_window": "20",
     },
 ]

@@ -858,6 +858,10 @@ class ArenaState:
                 "STARTUP: Deterministic confirmed momentum enabled "
                 f"(min_move={DETERMINISTIC_CONFIRMED_MIN_MOVE_PCT:.3f}%, min_ticks={DETERMINISTIC_CONFIRMED_MIN_TICKS})"
             )
+        if SIGNAL_STRATEGY == "deterministic_reversal":
+            self.add_log(
+                f"STARTUP: Deterministic reversal (mean-revert) enabled (min_move={DETERMINISTIC_MOMENTUM_MIN_MOVE_PCT:.3f}%)"
+            )
 
     @staticmethod
     def _default_daily_summary(day: str) -> dict:
@@ -2104,7 +2108,7 @@ class ArenaState:
             pending_key = (name, desk_key)
             try:
                 # Deterministic strategies don't call Ollama — process directly.
-                if SIGNAL_STRATEGY.startswith("deterministic"):
+                if SIGNAL_STRATEGY.startswith("deterministic") or SIGNAL_STRATEGY == "deterministic_reversal":
                     self._apply_ollama_signal(name, desk_key, ollama_tag, ref_price)
                     continue
                 history = list(self.price_history)  # snapshot outside lock
@@ -3581,7 +3585,7 @@ class ArenaState:
                 )
                 if should_trade:
                     # Deterministic strategies don't need Ollama; queue directly.
-                    if SIGNAL_STRATEGY.startswith("deterministic"):
+                    if SIGNAL_STRATEGY.startswith("deterministic") or SIGNAL_STRATEGY == "deterministic_reversal":
                         pending_key = (name, desk)
                         if pending_key not in self.ollama_signal_pending:
                             self.ollama_signal_pending.add(pending_key)
@@ -3622,6 +3626,15 @@ class ArenaState:
                 action = 1
             elif det_move_pct <= -deterministic_threshold:
                 action = -1
+            else:
+                action = 0
+            err = None
+        elif SIGNAL_STRATEGY == "deterministic_reversal":
+            # Mean-reversion: bet AGAINST the recent move direction.
+            if det_move_pct >= deterministic_threshold:
+                action = -1  # price moved up → go SHORT (expect reversion)
+            elif det_move_pct <= -deterministic_threshold:
+                action = 1   # price moved down → go LONG (expect reversion)
             else:
                 action = 0
             err = None
@@ -3676,8 +3689,8 @@ class ArenaState:
             trend_threshold = self._desk_momentum_override_threshold_pct(desk_key)
 
         # Guardrail: suppress entries that directly oppose current desk momentum direction.
-        # Skip this guardrail for reversal strategy — it intentionally goes against momentum.
-        if SIGNAL_STRATEGY != "reversal":
+        # Skip this guardrail for reversal strategies — they intentionally go against momentum.
+        if SIGNAL_STRATEGY not in ("reversal", "deterministic_reversal"):
             if action == 1 and move_pct <= -trend_threshold:
                 action = 0
             elif action == -1 and move_pct >= trend_threshold:
