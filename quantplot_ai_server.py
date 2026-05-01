@@ -370,6 +370,10 @@ try:
     DETERMINISTIC_CONFIRMED_MIN_TICKS = int(os.getenv("ALPHA_DETERMINISTIC_CONFIRMED_MIN_TICKS", "2"))
 except ValueError:
     DETERMINISTIC_CONFIRMED_MIN_TICKS = 2
+try:
+    DETERMINISTIC_MOVE_WINDOW = int(os.getenv("ALPHA_DETERMINISTIC_MOVE_WINDOW", "20"))
+except ValueError:
+    DETERMINISTIC_MOVE_WINDOW = 20
 
 AI_FALLBACK_CONFIRMATION_ENABLED = os.getenv("ALPHA_AI_FALLBACK_CONFIRMATION_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
 try:
@@ -3596,13 +3600,23 @@ class ArenaState:
         move_pct = self._desk_recent_move_pct(desk_key)
         entry_move_threshold = self._desk_entry_move_threshold_pct(desk_key)
         momentum_threshold = max(self._desk_momentum_override_threshold_pct(desk_key), entry_move_threshold)
+        # For deterministic strategies use a longer window to capture meaningful momentum.
+        if SIGNAL_STRATEGY.startswith("deterministic") and len(prices_seq) >= 2:
+            window = min(DETERMINISTIC_MOVE_WINDOW, len(prices_seq))
+            oldest = prices_seq[-window]
+            if oldest:
+                det_move_pct = ((prices_seq[-1] - oldest) / oldest) * 100.0
+            else:
+                det_move_pct = move_pct
+        else:
+            det_move_pct = move_pct
         deterministic_threshold = max(DETERMINISTIC_MOMENTUM_MIN_MOVE_PCT, entry_move_threshold)
         confirmed_threshold = max(DETERMINISTIC_CONFIRMED_MIN_MOVE_PCT, entry_move_threshold)
 
         if SIGNAL_STRATEGY == "deterministic_momentum":
-            if move_pct >= deterministic_threshold:
+            if det_move_pct >= deterministic_threshold:
                 action = 1
-            elif move_pct <= -deterministic_threshold:
+            elif det_move_pct <= -deterministic_threshold:
                 action = -1
             else:
                 action = 0

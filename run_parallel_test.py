@@ -100,6 +100,7 @@ def start_server(v: dict) -> subprocess.Popen:
         "ALPHA_PAPER_FORCE_CLOSE_ON_HOLD": v.get("force_close_on_hold", "1"),
         "ALPHA_SIGNAL_STRATEGY": v.get("signal_strategy", ""),
         "ALPHA_DETERMINISTIC_MOMENTUM_MIN_MOVE_PCT": str(v.get("momentum_threshold", v["edge"])),
+        "ALPHA_DETERMINISTIC_MOVE_WINDOW": str(v.get("det_move_window", "20")),
         "ALPHA_DISABLE_BASKET_TIMEOUT_FALLBACK": "1",
         "ALPHA_PAPER_RISK_OFF_MAX_DRAWDOWN_PCT": "0.20",
     })
