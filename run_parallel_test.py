@@ -88,7 +88,9 @@ def start_server(v: dict) -> subprocess.Popen:
         "ALPHA_BASE_SIGNAL_CHANCE": str(v.get("signal_chance", "1.0")),
         "ALPHA_MIN_PROFIT_EDGE_PCT": "0.03",
         "ALPHA_MIN_PROFIT_EDGE_PCT_BTC": "0.05",
-        "ALPHA_MIN_PROFIT_EDGE_PCT_BASKET": str(v["edge"]),
+        # For deterministic strategies the signal threshold is set separately;
+        # zero out the edge gate so it doesn't swallow the action.
+        "ALPHA_MIN_PROFIT_EDGE_PCT_BASKET": "0.0" if v.get("signal_strategy", "").startswith("deterministic") else str(v["edge"]),
         "ALPHA_MIN_TRADE_MOVE_PCT": "0.0",
         "ALPHA_MOMENTUM_OVERRIDE_THRESHOLD_PCT_BASKET": str(v.get("momentum_threshold", v["edge"])),
         "ALPHA_DIRECTIONAL_PERSISTENCE_MIN_STREAK_BASKET": str(v["persistence"]),
