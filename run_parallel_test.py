@@ -15,41 +15,81 @@ import urllib.request
 from pathlib import Path
 
 VARIANTS = [
-    # V1: Basket momentum — threshold well above 0.20% round-trip fee floor
-    # 60-min endurance run: BASKET reversal 0.045% with regime filter (sweep 4 winner)
+    # V1: Reversal basket 0.060% — best ex-fee alpha seen (60-min session), now with hold=1.
     {
-        "name": "VARIANT-V1 (det_reversal BASKET 0.045 regime_filter size=5000)",
+        "name": "VARIANT-V1 (det_reversal BASKET 0.060 hold=1 regime=1 size=5000)",
         "port": 8001,
         "model": "Llama-3.2",
         "desk": "basket",
-        "edge": 0.045,
+        "edge": 0.060,
         "persistence": 1,
         "reversal": 1.6,
         "size_usd": 5000,
-        "force_close_on_hold": "0",
+        "force_close_on_hold": "1",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.045,
+        "momentum_threshold": 0.060,
         "signal_strategy": "deterministic_reversal",
         "det_move_window": "20",
+        "hold_cooldown_ticks": "12",
         "regime_filter": "1",
     },
-    # BTC reversal 0.030% with regime filter (showed +$0.94 ex-fee, want to see over longer horizon)
+    # V2: Reversal basket 0.080% — fewer but higher-quality reversal signals.
     {
-        "name": "VARIANT-V2 (det_reversal BTC 0.030 regime_filter size=5000)",
+        "name": "VARIANT-V2 (det_reversal BASKET 0.080 hold=1 regime=1 size=5000)",
         "port": 8002,
         "model": "Llama-3.2",
-        "desk": "btc",
-        "edge": 0.030,
+        "desk": "basket",
+        "edge": 0.080,
         "persistence": 1,
         "reversal": 1.6,
         "size_usd": 5000,
-        "force_close_on_hold": "0",
+        "force_close_on_hold": "1",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.030,
+        "momentum_threshold": 0.080,
         "signal_strategy": "deterministic_reversal",
         "det_move_window": "20",
+        "hold_cooldown_ticks": "12",
+        "regime_filter": "1",
+    },
+    # V3: Confirmed momentum basket 0.060/2 ticks — tonight's best confirmed config.
+    {
+        "name": "VARIANT-V3 (det_confirmed BASKET 0.060 ticks=2 cd=10 hold=1 size=5000)",
+        "port": 8003,
+        "model": "Llama-3.2",
+        "desk": "basket",
+        "edge": 0.060,
+        "persistence": 1,
+        "reversal": 1.6,
+        "size_usd": 5000,
+        "force_close_on_hold": "1",
+        "signal_chance": 1.0,
+        "momentum_override": "0",
+        "momentum_threshold": 0.060,
+        "signal_strategy": "deterministic_confirmed",
+        "det_move_window": "20",
+        "det_confirmed_min_move_pct": 0.060,
+        "det_confirmed_min_ticks": 2,
+        "hold_cooldown_ticks": "10",
+    },
+    # V4: Reversal BTC 0.060% — BTC is more volatile overnight; regime filter guards trending.
+    {
+        "name": "VARIANT-V4 (det_reversal BTC 0.060 hold=1 regime=1 size=5000)",
+        "port": 8004,
+        "model": "Llama-3.2",
+        "desk": "btc",
+        "edge": 0.060,
+        "persistence": 1,
+        "reversal": 1.6,
+        "size_usd": 5000,
+        "force_close_on_hold": "1",
+        "signal_chance": 1.0,
+        "momentum_override": "0",
+        "momentum_threshold": 0.060,
+        "signal_strategy": "deterministic_reversal",
+        "det_move_window": "20",
+        "hold_cooldown_ticks": "12",
         "regime_filter": "1",
     },
 ]
@@ -112,7 +152,7 @@ def start_server(v: dict) -> subprocess.Popen:
         "ALPHA_PAPER_RISK_OFF_MAX_DRAWDOWN_PCT": "0.20",
         "ALPHA_REVERSAL_REGIME_FILTER_ENABLED": v.get("regime_filter", "1"),
         # Deterministic strategies re-evaluate every tick — don't block re-entry for 12 ticks after a HOLD.
-        "ALPHA_HOLD_COOLDOWN_TICKS": "2" if v.get("signal_strategy", "").startswith("deterministic") else "12",
+        "ALPHA_HOLD_COOLDOWN_TICKS": str(v.get("hold_cooldown_ticks", "2" if v.get("signal_strategy", "").startswith("deterministic") else "12")),
     })
     proc = subprocess.Popen(
         ["python3", "quantplot_ai_server.py"],
@@ -211,7 +251,7 @@ def print_results(results: dict) -> None:
 
 def main():
     print("=" * 80)
-    print(f"3-WAY PARALLEL TEST  ({DURATION}s each = {DURATION//60} min)")
+    print(f"4-WAY PARALLEL TEST  ({DURATION}s each = {DURATION//60} min)")
     print("=" * 80)
 
     os.system("pkill -f quantplot_ai_server.py 2>/dev/null; sleep 1")
