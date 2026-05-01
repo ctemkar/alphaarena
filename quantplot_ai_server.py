@@ -4011,6 +4011,7 @@ class ArenaHandler(SimpleHTTPRequestHandler):
             "/api/message/pnl-health",
             "/api/message/recent-summary",
             "/api/paper-mode",
+            "/api/paper-close-all",
         }:
             self._json(404, {"ok": False, "error": "Not found"})
             return
@@ -4264,6 +4265,23 @@ class ArenaHandler(SimpleHTTPRequestHandler):
                 label = "PAPER (no real orders)" if self.state.paper_mode else "LIVE (real orders)"
                 self.state.add_log(f"Paper mode {'ENABLED' if self.state.paper_mode else 'DISABLED'} \u2014 {label}")
             self._json(200, {"ok": True, "changed": changed, "paper_mode": bool(enabled_raw)})
+            return
+
+        if route_path == "/api/paper-close-all":
+            if not self.state.paper_mode:
+                self._json(400, {"ok": False, "error": "Not in paper mode"})
+                return
+            closed = 0
+            with self.state.lock:
+                pairs = {(model_name, desk) for (model_name, desk, _symbol) in self.state.paper_ledger.keys()}
+                for model_name, desk_key in pairs:
+                    closed += self.state._close_paper_ledger_positions_unlocked(
+                        model_name,
+                        desk_key,
+                        "session_end",
+                        "session_end",
+                    )
+            self._json(200, {"ok": True, "closed": closed})
             return
 
         model = data.get("model", "")

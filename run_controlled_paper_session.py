@@ -99,6 +99,10 @@ def main() -> None:
         prev_btc = cur["btc_last"]
         prev_basket = cur["basket_last"]
 
+    # Force-close all open positions so final snapshot reflects realized P&L only.
+    close_result = post("/api/paper-close-all", {})
+    print("close_all", close_result)
+
     end_state = get_state()
     end = summarize(end_state)
     print("END", json.dumps(end, indent=2))
