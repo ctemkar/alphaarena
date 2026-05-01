@@ -2103,6 +2103,10 @@ class ArenaState:
             name, desk_key, ollama_tag, ref_price = self.ollama_signal_queue.get()
             pending_key = (name, desk_key)
             try:
+                # Deterministic strategies don't call Ollama — process directly.
+                if SIGNAL_STRATEGY.startswith("deterministic"):
+                    self._apply_ollama_signal(name, desk_key, ollama_tag, ref_price)
+                    continue
                 history = list(self.price_history)  # snapshot outside lock
                 resolved_tag, signal_arm, signal_provider = self._resolve_signal_target(name, desk_key, ollama_tag)
                 started = time.perf_counter()
