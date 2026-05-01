@@ -3572,15 +3572,22 @@ class ArenaState:
                     self.always_trade_enabled or random.random() < self._signal_chance(desk)
                 )
                 if should_trade:
-                    ollama_tag = self._model_provider_map().get(name)
-                    if ollama_tag:
-                        # Queue only if no request is already pending for this model/desk.
+                    # Deterministic strategies don't need Ollama; queue directly.
+                    if SIGNAL_STRATEGY.startswith("deterministic"):
                         pending_key = (name, desk)
                         if pending_key not in self.ollama_signal_pending:
                             self.ollama_signal_pending.add(pending_key)
-                            self.ollama_signal_queue.put((name, desk, ollama_tag, ref_price))
+                            self.ollama_signal_queue.put((name, desk, "_deterministic_", ref_price))
                     else:
-                        self.add_log(f"{name} [{desk.upper()}]: skipped (no mapped Ollama model)")
+                        ollama_tag = self._model_provider_map().get(name)
+                        if ollama_tag:
+                            # Queue only if no request is already pending for this model/desk.
+                            pending_key = (name, desk)
+                            if pending_key not in self.ollama_signal_pending:
+                                self.ollama_signal_pending.add(pending_key)
+                                self.ollama_signal_queue.put((name, desk, ollama_tag, ref_price))
+                        else:
+                            self.add_log(f"{name} [{desk.upper()}]: skipped (no mapped Ollama model)")
 
     def _apply_ollama_signal(self, name: str, desk_key: str, ollama_tag: str, ref_price: float) -> None:
         history = list(self.price_history)  # snapshot outside lock
