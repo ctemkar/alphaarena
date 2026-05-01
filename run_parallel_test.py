@@ -16,60 +16,63 @@ from pathlib import Path
 
 VARIANTS = [
     {
-        "name": "VARIANT-V1 (det_mom move=0.001 p=1 rev=1.6 size=150)",
+        "name": "VARIANT-V1 (det_mom BASKET move=0.020 size=500)",
         "port": 8001,
         "model": "Llama-3.2",
-        "edge": 0.001,
+        "desk": "basket",
+        "edge": 0.020,
         "persistence": 1,
         "reversal": 1.6,
-        "size_usd": 150,
+        "size_usd": 500,
         "force_close_on_hold": "0",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.001,
+        "momentum_threshold": 0.020,
         "signal_strategy": "deterministic_momentum",
     },
     {
-        "name": "VARIANT-V2 (det_mom move=0.003 p=1 rev=1.6 size=150)",
+        "name": "VARIANT-V2 (det_mom BASKET move=0.030 size=500)",
         "port": 8002,
         "model": "Llama-3.2",
-        "edge": 0.003,
+        "desk": "basket",
+        "edge": 0.030,
         "persistence": 1,
         "reversal": 1.6,
-        "size_usd": 150,
+        "size_usd": 500,
         "force_close_on_hold": "0",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.003,
+        "momentum_threshold": 0.030,
         "signal_strategy": "deterministic_momentum",
     },
     {
-        "name": "VARIANT-V3 (det_mom move=0.005 p=1 rev=1.6 size=150)",
+        "name": "VARIANT-V3 (det_mom BTC move=0.020 size=500)",
         "port": 8003,
         "model": "Llama-3.2",
-        "edge": 0.005,
+        "desk": "btc",
+        "edge": 0.020,
         "persistence": 1,
         "reversal": 1.6,
-        "size_usd": 150,
+        "size_usd": 500,
         "force_close_on_hold": "0",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.005,
+        "momentum_threshold": 0.020,
         "signal_strategy": "deterministic_momentum",
     },
     {
-        "name": "VARIANT-V4 (det_mom BTC move=0.005 p=1 rev=1.6 size=150)",
+        "name": "VARIANT-V4 (det_mom BTC move=0.030 size=500)",
         "port": 8004,
         "model": "Llama-3.2",
         "desk": "btc",
-        "edge": 0.005,
+        "edge": 0.030,
         "persistence": 1,
         "reversal": 1.6,
-        "size_usd": 150,
+        "size_usd": 500,
         "force_close_on_hold": "0",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.005,
+        "momentum_threshold": 0.030,
         "signal_strategy": "deterministic_momentum",
     },
 ]
@@ -179,6 +182,7 @@ def run_harness(v: dict, result_store: dict) -> None:
 
 
 def print_results(results: dict) -> None:
+    import datetime
     print("\n" + "=" * 80)
     print("FINAL RESULTS")
     print("=" * 80)
@@ -196,13 +200,24 @@ def print_results(results: dict) -> None:
     ranked.sort(key=lambda x: x["net"], reverse=True)
     for i, r in enumerate(ranked):
         fee_drag = r["ex_fee"] - r["net"]
+        win_rate = (r["wins"] / r["trades"] * 100) if r["trades"] > 0 else 0.0
         label = "WINNER" if i == 0 else f"#{i+1}"
         print(f"\n[{label}] {r['name']}")
-        print(f"  net={r['net']:+.6f}  ex_fee={r['ex_fee']:+.6f}  fee_drag={fee_drag:.6f}")
-        print(f"  trades={r['trades']}  wins={r['wins']}  losses={r['losses']}")
+        print(f"  net={r['net']:+.4f}  ex_fee={r['ex_fee']:+.4f}  fee_drag={fee_drag:.4f}")
+        print(f"  trades={r['trades']}  wins={r['wins']}  losses={r['losses']}  win_rate={win_rate:.1f}%")
     print("\n" + "=" * 80)
     print("PARALLEL TEST COMPLETE")
     print("=" * 80)
+
+    # Write timestamped JSON summary so results are always retrievable
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    summary_path = f"/tmp/sweep_result_{ts}.json"
+    with open(summary_path, "w") as f:
+        json.dump({"timestamp": ts, "duration_s": DURATION, "ranked": ranked}, f, indent=2)
+    # Overwrite latest sentinel so a watcher knows the run finished
+    with open("/tmp/sweep_latest_result.json", "w") as f:
+        json.dump({"timestamp": ts, "duration_s": DURATION, "ranked": ranked}, f, indent=2)
+    print(f"\nResults saved → {summary_path}")
 
 
 def main():
