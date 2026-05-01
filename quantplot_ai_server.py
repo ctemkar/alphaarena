@@ -2313,9 +2313,17 @@ class ArenaState:
                     desk = desk_key.upper()
                     live_side = side
                     self._canary_on_signal(signal_arm, side, latency_ms, bool(err))
+                    signal_reasons = []
+                    if hold_override_used:
+                        signal_reasons.append("hold_override")
+                    if selective_reverse_used:
+                        signal_reasons.append("selective_reverse")
+                    if forced_risk_off:
+                        signal_reasons.append("risk_off")
+                    reason_suffix = f" reasons={','.join(signal_reasons)}" if signal_reasons else ""
                     self.add_log(
                         f"{name} [{desk}]: {side} @ ${ref_price:,.2f} [AI] "
-                        f"(provider={signal_provider}, arm={signal_arm}, latency={latency_ms:.1f}ms)"
+                        f"(provider={signal_provider}, arm={signal_arm}, latency={latency_ms:.1f}ms{reason_suffix})"
                     )
                     _log_movement({
                         "type":   "signal",
