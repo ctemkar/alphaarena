@@ -16,76 +16,74 @@ from pathlib import Path
 
 VARIANTS = [
     # V1: Basket momentum — threshold well above 0.20% round-trip fee floor
+    # V1: Basket MOMENTUM ride — enter on move, hold through HOLDs, exit on reversal
+    # force_close_on_hold=0: positions ride the wave instead of cutting immediately on HOLD
     {
-        "name": "VARIANT-V1 (det_mom BASKET move=0.25 size=500)",
+        "name": "VARIANT-V1 (det_mom BASKET move=0.10 ride size=500)",
         "port": 8001,
         "model": "Llama-3.2",
         "desk": "basket",
-        "edge": 0.25,
+        "edge": 0.10,
         "persistence": 1,
         "reversal": 1.6,
         "size_usd": 500,
-        "force_close_on_hold": "1",
+        "force_close_on_hold": "0",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.25,
+        "momentum_threshold": 0.10,
         "signal_strategy": "deterministic_momentum",
         "det_move_window": "20",
     },
-    # V2: Basket momentum — higher threshold to catch stronger moves only
+    # V2: Basket REVERSAL — bet price mean-reverts after a 0.10% move, hold until opposite signal
     {
-        "name": "VARIANT-V2 (det_mom BASKET move=0.40 size=500)",
+        "name": "VARIANT-V2 (det_reversal BASKET move=0.10 size=500)",
         "port": 8002,
         "model": "Llama-3.2",
         "desk": "basket",
-        "edge": 0.40,
+        "edge": 0.10,
         "persistence": 1,
         "reversal": 1.6,
         "size_usd": 500,
-        "force_close_on_hold": "1",
+        "force_close_on_hold": "0",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.40,
-        "signal_strategy": "deterministic_momentum",
+        "momentum_threshold": 0.10,
+        "signal_strategy": "reversal",
         "det_move_window": "20",
     },
-    # V3: BTC confirmed — requires every tick in window to agree (filters noise/reversals)
+    # V3: BTC MOMENTUM ride — stronger threshold (BTC more volatile)
     {
-        "name": "VARIANT-V3 (det_confirmed BTC move=0.25 ticks=3 size=500)",
+        "name": "VARIANT-V3 (det_mom BTC move=0.12 ride size=500)",
         "port": 8003,
         "model": "Llama-3.2",
         "desk": "btc",
-        "edge": 0.25,
+        "edge": 0.12,
         "persistence": 1,
         "reversal": 1.6,
         "size_usd": 500,
-        "force_close_on_hold": "1",
+        "force_close_on_hold": "0",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.25,
-        "signal_strategy": "deterministic_confirmed",
+        "momentum_threshold": 0.12,
+        "signal_strategy": "deterministic_momentum",
         "det_move_window": "20",
-        "det_confirmed_min_ticks": 3,
-        "det_confirmed_min_move_pct": 0.25,
     },
-    # V4: BTC confirmed — stronger threshold + more confirmation ticks
+    # V4: BTC REVERSAL — bet BTC mean-reverts after 0.12% swing
     {
-        "name": "VARIANT-V4 (det_confirmed BTC move=0.40 ticks=4 size=500)",
+        "name": "VARIANT-V4 (det_reversal BTC move=0.12 size=500)",
         "port": 8004,
         "model": "Llama-3.2",
         "desk": "btc",
-        "edge": 0.40,
+        "edge": 0.12,
         "persistence": 1,
         "reversal": 1.6,
         "size_usd": 500,
-        "force_close_on_hold": "1",
+        "force_close_on_hold": "0",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.40,
-        "signal_strategy": "deterministic_confirmed",
+        "momentum_threshold": 0.12,
+        "signal_strategy": "reversal",
         "det_move_window": "20",
-        "det_confirmed_min_ticks": 4,
-        "det_confirmed_min_move_pct": 0.40,
     },
 ]
 
@@ -118,7 +116,9 @@ def start_server(v: dict) -> subprocess.Popen:
         "ALPHA_BASE_SIGNAL_CHANCE": str(v.get("signal_chance", "1.0")),
         "ALPHA_MIN_PROFIT_EDGE_PCT": "0.03",
         # Use realistic taker fee: 5 bps per leg = 10 bps round-trip (Binance/Bybit standard)
-        "ALPHA_ANALYTICS_FEE_BPS": "5",
+        # Realistic perpetual futures fees: 3 bps taker fee + 1 bps slippage = 4 bps per leg = 8 bps round-trip
+        "ALPHA_ANALYTICS_FEE_BPS": "3",
+        "ALPHA_ANALYTICS_SLIPPAGE_BPS": "1",
         # Zero out per-desk edge gate for deterministic strategies; threshold is the sole gate.
         "ALPHA_MIN_PROFIT_EDGE_PCT_BTC": "0.0" if v.get("signal_strategy", "").startswith("deterministic") else "0.05",
         "ALPHA_MIN_PROFIT_EDGE_PCT_BASKET": "0.0" if v.get("signal_strategy", "").startswith("deterministic") else str(v["edge"]),

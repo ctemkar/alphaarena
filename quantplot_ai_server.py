@@ -3676,10 +3676,12 @@ class ArenaState:
             trend_threshold = self._desk_momentum_override_threshold_pct(desk_key)
 
         # Guardrail: suppress entries that directly oppose current desk momentum direction.
-        if action == 1 and move_pct <= -trend_threshold:
-            action = 0
-        elif action == -1 and move_pct >= trend_threshold:
-            action = 0
+        # Skip this guardrail for reversal strategy — it intentionally goes against momentum.
+        if SIGNAL_STRATEGY != "reversal":
+            if action == 1 and move_pct <= -trend_threshold:
+                action = 0
+            elif action == -1 and move_pct >= trend_threshold:
+                action = 0
         live_desk = desk_key
         live_side = "HOLD"
         hold_override_used = False
@@ -3739,6 +3741,17 @@ class ArenaState:
                 if HOLD_CLOSES_POSITION:
                     self._close_trade_if_open(name, desk_key, slot, "hold_signal", ref_price)
                     slot["pos"] = 0.0
+                # Also close paper ledger positions on HOLD when configured, so that
+                # paper_summary wins/losses are recorded at the HOLD price rather than
+                # waiting for a full signal flip (which structurally exits at the wrong price).
+                if PAPER_FORCE_CLOSE_ON_HOLD:
+                    closed_count = self._close_paper_ledger_positions_unlocked(
+                        name, desk_key, "control", "hold_signal"
+                    )
+                    if closed_count > 0:
+                        self.add_log(
+                            f"{name} [{desk_key.upper()}]: closed {closed_count} paper ledger position(s) on HOLD"
+                        )
                 slot["directional_candidate_side"] = "HOLD"
                 slot["directional_candidate_streak"] = 0
                 slot["mark_price"] = ref_price
