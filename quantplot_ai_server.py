@@ -375,6 +375,8 @@ try:
 except ValueError:
     DETERMINISTIC_MOVE_WINDOW = 20
 
+REVERSAL_REGIME_FILTER_ENABLED = os.getenv("ALPHA_REVERSAL_REGIME_FILTER_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+
 AI_FALLBACK_CONFIRMATION_ENABLED = os.getenv("ALPHA_AI_FALLBACK_CONFIRMATION_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
 try:
     AI_FALLBACK_MIN_MOVE_PCT = float(os.getenv("ALPHA_AI_FALLBACK_MIN_MOVE_PCT", "0.04"))
@@ -3609,7 +3611,7 @@ class ArenaState:
         entry_move_threshold = self._desk_entry_move_threshold_pct(desk_key)
         momentum_threshold = max(self._desk_momentum_override_threshold_pct(desk_key), entry_move_threshold)
         # For deterministic strategies use a longer window to capture meaningful momentum.
-        if SIGNAL_STRATEGY.startswith("deterministic") and len(prices_seq) >= 2:
+        if (SIGNAL_STRATEGY.startswith("deterministic") or SIGNAL_STRATEGY == "deterministic_reversal") and len(prices_seq) >= 2:
             window = min(DETERMINISTIC_MOVE_WINDOW, len(prices_seq))
             oldest = prices_seq[-window]
             if oldest:
@@ -3618,6 +3620,14 @@ class ArenaState:
                 det_move_pct = move_pct
         else:
             det_move_pct = move_pct
+        # Regime filter for reversal: compute a longer-term trend to detect trending vs ranging markets.
+        # Use 3× the short window (up to 60 ticks ≈ 3 min) to see the broader trend direction.
+        if SIGNAL_STRATEGY == "deterministic_reversal" and len(prices_seq) >= 4:
+            regime_window = min(max(DETERMINISTIC_MOVE_WINDOW * 3, 60), len(prices_seq))
+            regime_oldest = prices_seq[-regime_window]
+            regime_trend_pct = ((prices_seq[-1] - regime_oldest) / regime_oldest) * 100.0 if regime_oldest else 0.0
+        else:
+            regime_trend_pct = 0.0
         deterministic_threshold = max(DETERMINISTIC_MOMENTUM_MIN_MOVE_PCT, entry_move_threshold)
         confirmed_threshold = max(DETERMINISTIC_CONFIRMED_MIN_MOVE_PCT, entry_move_threshold)
 
@@ -3630,8 +3640,14 @@ class ArenaState:
                 action = 0
             err = None
         elif SIGNAL_STRATEGY == "deterministic_reversal":
-            # Mean-reversion: bet AGAINST the recent move direction.
-            if det_move_pct >= deterministic_threshold:
+            # Regime filter: only trade mean-reversion in ranging (choppy) markets.
+            # If the longer-term trend exceeds 4× the entry threshold the market is trending —
+            # skip reversal (a trending market won't mean-revert reliably).
+            regime_trend_threshold = deterministic_threshold * 4.0
+            if REVERSAL_REGIME_FILTER_ENABLED and abs(regime_trend_pct) > regime_trend_threshold:
+                action = 0  # trending market — stay flat
+            # Mean-reversion: bet AGAINST the recent short-term move direction.
+            elif det_move_pct >= deterministic_threshold:
                 action = -1  # price moved up → go SHORT (expect reversion)
             elif det_move_pct <= -deterministic_threshold:
                 action = 1   # price moved down → go LONG (expect reversion)

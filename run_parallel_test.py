@@ -16,9 +16,11 @@ from pathlib import Path
 
 VARIANTS = [
     # V1: Basket momentum — threshold well above 0.20% round-trip fee floor
-    # V1: BASKET reversal 0.030% (proven fires, baseline for comparison)
+    # V1: BASKET reversal 0.030% WITH regime filter (×4 = skip when 60-tick trend > 0.12%)
+    # Sweep 2 showed this config wins 34.8% in choppy markets; sweep 3 showed 0% when trending.
+    # Regime filter should block trades during trending phases.
     {
-        "name": "VARIANT-V1 (det_reversal BASKET move=0.030 size=5000)",
+        "name": "VARIANT-V1 (det_reversal BASKET 0.030 regime_filter size=5000)",
         "port": 8001,
         "model": "Llama-3.2",
         "desk": "basket",
@@ -33,29 +35,44 @@ VARIANTS = [
         "signal_strategy": "deterministic_reversal",
         "det_move_window": "20",
     },
-    # V2: BASKET reversal 0.060% — wider threshold: only trade when move is 2x bigger
-    # Fewer trades but each has more room to revert (edge > fee floor)
+    # V2: BASKET reversal 0.045% with regime filter — less noise than 0.030%, each signal stronger
     {
-        "name": "VARIANT-V2 (det_reversal BASKET move=0.060 size=5000)",
+        "name": "VARIANT-V2 (det_reversal BASKET 0.045 regime_filter size=5000)",
         "port": 8002,
         "model": "Llama-3.2",
         "desk": "basket",
-        "edge": 0.060,
+        "edge": 0.045,
         "persistence": 1,
         "reversal": 1.6,
         "size_usd": 5000,
         "force_close_on_hold": "0",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.060,
+        "momentum_threshold": 0.045,
         "signal_strategy": "deterministic_reversal",
         "det_move_window": "20",
     },
-    # V3: BASKET reversal 0.030% with longer hold window (40 ticks = 2 min)
-    # Let the reversion play out fully before exit
+    # V3: BTC reversal 0.030% with regime filter — BTC is more volatile, filter should help
     {
-        "name": "VARIANT-V3 (det_reversal BASKET move=0.030 window=40 size=5000)",
+        "name": "VARIANT-V3 (det_reversal BTC 0.030 regime_filter size=5000)",
         "port": 8003,
+        "model": "Llama-3.2",
+        "desk": "btc",
+        "edge": 0.030,
+        "persistence": 1,
+        "reversal": 1.6,
+        "size_usd": 5000,
+        "force_close_on_hold": "0",
+        "signal_chance": 1.0,
+        "momentum_override": "0",
+        "momentum_threshold": 0.030,
+        "signal_strategy": "deterministic_reversal",
+        "det_move_window": "20",
+    },
+    # V4: BASKET reversal 0.030% baseline WITHOUT regime filter — control group for comparison
+    {
+        "name": "VARIANT-V4 (det_reversal BASKET 0.030 NO_filter size=5000)",
+        "port": 8004,
         "model": "Llama-3.2",
         "desk": "basket",
         "edge": 0.030,
@@ -67,24 +84,8 @@ VARIANTS = [
         "momentum_override": "0",
         "momentum_threshold": 0.030,
         "signal_strategy": "deterministic_reversal",
-        "det_move_window": "40",
-    },
-    # V4: BTC reversal 0.060% (showed +$1.35 ex-fee last run) at larger size
-    {
-        "name": "VARIANT-V4 (det_reversal BTC move=0.060 size=5000)",
-        "port": 8004,
-        "model": "Llama-3.2",
-        "desk": "btc",
-        "edge": 0.060,
-        "persistence": 1,
-        "reversal": 1.6,
-        "size_usd": 5000,
-        "force_close_on_hold": "0",
-        "signal_chance": 1.0,
-        "momentum_override": "0",
-        "momentum_threshold": 0.060,
-        "signal_strategy": "deterministic_reversal",
         "det_move_window": "20",
+        "regime_filter": "0",
     },
 ]
 
@@ -144,6 +145,7 @@ def start_server(v: dict) -> subprocess.Popen:
         "ALPHA_DETERMINISTIC_MOVE_WINDOW": str(v.get("det_move_window", "20")),
         "ALPHA_DISABLE_BASKET_TIMEOUT_FALLBACK": "1",
         "ALPHA_PAPER_RISK_OFF_MAX_DRAWDOWN_PCT": "0.20",
+        "ALPHA_REVERSAL_REGIME_FILTER_ENABLED": v.get("regime_filter", "1"),
         # Deterministic strategies re-evaluate every tick — don't block re-entry for 12 ticks after a HOLD.
         "ALPHA_HOLD_COOLDOWN_TICKS": "2" if v.get("signal_strategy", "").startswith("deterministic") else "12",
     })
