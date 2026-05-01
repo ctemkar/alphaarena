@@ -16,7 +16,7 @@ from pathlib import Path
 
 VARIANTS = [
     {
-        "name": "VARIANT-V1 (edge=0.055 p=1 rev=1.6 size=150 chance=0.70)",
+        "name": "VARIANT-V1 (edge=0.055 p=1 rev=1.6 size=150 mthr=0.010)",
         "port": 8001,
         "model": "Llama-3.2",
         "edge": 0.055,
@@ -24,12 +24,12 @@ VARIANTS = [
         "reversal": 1.6,
         "size_usd": 150,
         "force_close_on_hold": "0",
-        "signal_chance": 0.70,
+        "signal_chance": 1.0,
         "momentum_override": "1",
-        "momentum_threshold": 0.04,
+        "momentum_threshold": 0.010,
     },
     {
-        "name": "VARIANT-V2 (edge=0.055 p=1 rev=1.6 size=150 chance=0.85)",
+        "name": "VARIANT-V2 (edge=0.055 p=1 rev=1.6 size=150 mthr=0.020)",
         "port": 8002,
         "model": "Llama-3.2",
         "edge": 0.055,
@@ -37,12 +37,12 @@ VARIANTS = [
         "reversal": 1.6,
         "size_usd": 150,
         "force_close_on_hold": "0",
-        "signal_chance": 0.85,
+        "signal_chance": 1.0,
         "momentum_override": "1",
-        "momentum_threshold": 0.04,
+        "momentum_threshold": 0.020,
     },
     {
-        "name": "VARIANT-V3 (edge=0.055 p=1 rev=1.6 size=150 chance=1.00)",
+        "name": "VARIANT-V3 (edge=0.055 p=1 rev=1.6 size=150 mthr=0.030)",
         "port": 8003,
         "model": "Llama-3.2",
         "edge": 0.055,
@@ -52,7 +52,7 @@ VARIANTS = [
         "force_close_on_hold": "0",
         "signal_chance": 1.0,
         "momentum_override": "1",
-        "momentum_threshold": 0.04,
+        "momentum_threshold": 0.030,
     },
 ]
 
