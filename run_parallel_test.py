@@ -289,7 +289,7 @@ def print_results(results: dict) -> None:
         print(f"  net={r['net']:+.4f}  ex_fee={r['ex_fee']:+.4f}  fee_drag={fee_drag:.4f}")
         print(f"  trades={r['trades']}  wins={r['wins']}  losses={r['losses']}  win_rate={win_rate:.1f}%")
     print("\n" + "=" * 80)
-    print("PARALLEL TEST COMPLETE")
+    print("SEQUENTIAL TEST COMPLETE")
     print("=" * 80)
 
     # Write timestamped JSON summary so results are always retrievable
@@ -304,41 +304,36 @@ def print_results(results: dict) -> None:
 
 
 def main():
+    total = len(VARIANTS)
     print("=" * 80)
-    print(f"4-WAY PARALLEL TEST  ({DURATION}s each = {DURATION//60} min)")
+    print(f"SEQUENTIAL TEST  ({total} variants × {DURATION}s each = {total * DURATION // 60} min total)")
     print("=" * 80)
 
     os.system("pkill -f quantplot_ai_server.py 2>/dev/null; sleep 1")
 
-    print("\n[SETUP] Starting servers...")
-    servers = []
-    for v in VARIANTS:
-        servers.append((v, start_server(v)))
-        time.sleep(1)
-
-    print("\n[SETUP] Waiting for servers...")
-    ready = [wait_for_server(v["port"]) for v, _ in servers]
-    if not all(ready):
-        print("✗ Not all servers came up. Aborting.")
-        for _, p in servers:
-            p.terminate()
-        return
-
     results = {}
-    threads = [threading.Thread(target=run_harness, args=(v, results)) for v, _ in servers]
+    for i, v in enumerate(VARIANTS, 1):
+        print(f"\n[{i}/{total}] Starting {v['name']} on port {v['port']}...")
 
-    print(f"\n[TESTS] All {len(threads)} sessions starting in parallel...\n")
-    try:
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-    finally:
-        print("\n[CLEANUP] Stopping servers...")
-        for _, p in servers:
-            p.terminate()
-        for _, p in servers:
-            p.wait(timeout=5)
+        # Clear the port before starting
+        os.system(f"lsof -ti:{v['port']} 2>/dev/null | xargs kill -9 2>/dev/null; sleep 1")
+
+        proc = start_server(v)
+        if not wait_for_server(v["port"]):
+            print(f"  ✗ Server failed to start. Skipping.")
+            proc.terminate()
+            results[v["name"]] = {"delta": {}, "raw": "", "status": "server_failed"}
+            continue
+
+        print(f"  ✓ Server up. Running {DURATION}s harness...")
+        try:
+            run_harness(v, results)
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+            # Force-clear the port after done
+            os.system(f"lsof -ti:{v['port']} 2>/dev/null | xargs kill -9 2>/dev/null")
+            print(f"  Server stopped.")
 
     print_results(results)
 
