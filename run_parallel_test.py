@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Parallel test runner - 3-way comparison of middle-ground basket configs.
-Variant A: edge=0.045, persistence=1, reversal=1.3, size=$25  (strict-mid)
-Variant B: edge=0.035, persistence=1, reversal=1.2, size=$30  (middle)
-Variant C: edge=0.028, persistence=1, reversal=1.0, size=$40  (lenient)
-All use Llama-3.2 (fast), canary off.
+Parallel test runner - extended-hold duration sweep.
+Insight: reversal IS real (ex_fee positive) but HOLD exits capture only 30% of needed recovery.
+Fix: hold longer (timed exit or TP set just above breakeven).
+Breakeven = 8 bps round-trip (taker). Maker = 1 bps round-trip.
 """
 import json
 import os
@@ -14,12 +13,19 @@ import time
 import urllib.request
 from pathlib import Path
 
-# MULTI-OPTION FEE-DRAG SWEEP — 4 orthogonal approaches to net profitability.
-# Base: det_reversal BTC 0.080% threshold, 20-tick window, hold=1, regime filter, $5k.
+# EXTENDED-HOLD DURATION SWEEP
+# Insight from prior runs: ex_fee=+$1.22 on $5k (0.024% captured) but need 0.080% (8bps) to
+# break even on taker fees. Direction is correct but HOLD-triggered exit only captures 30% of
+# the needed recovery. Fix: hold longer (timed or TP just above breakeven).
+#
+# Taker breakeven: 8 bps round-trip. Maker breakeven: 1 bps round-trip.
+# If BTC drops 8bps and reverts fully, gross profit = 8bps. Need > 8bps to be net positive.
+# Currently capturing 2.4bps → close 3x too early.
 VARIANTS = [
-    # V1 — Control: current best (taker fees 8bps rt, force-close on HOLD immediately).
+    # V1 — Timed exit: hold exactly 80 ticks (4 min) after HOLD signal, no TP/SL.
+    # Tests: does BTC revert enough in 4 min to overcome 8bps fee? Pure time-based.
     {
-        "name": "VARIANT-V1 (Control: taker 8bps rt, force_close)",
+        "name": "VARIANT-V1 (Timed 80tick=4min hold, taker 8bps)",
         "port": 8001,
         "model": "Llama-3.2",
         "desk": "btc",
@@ -37,15 +43,16 @@ VARIANTS = [
         "regime_filter": "1",
         "fee_bps": "3",
         "slippage_bps": "1",
-        "hold_extend_ticks": "0",
-        "tp_bps": "0",
-        "sl_bps": "0",
+        "hold_extend_ticks": "80",   # 80 ticks × 3s = 4 min max
+        "tp_bps": "0",               # no TP — pure timed exit
+        "sl_bps": "0",               # no SL — ride it out
         "reversal_require_recovery": "0",
     },
-    # V2 — Option B: maker fee simulation (0.5 bps/leg = 1 bps round-trip).
-    # Tests: would this strategy be profitable if we posted limit orders instead of takers?
+    # V2 — TP=8bps (exactly taker breakeven), SL=6bps, max=80ticks.
+    # Exit the moment we reach breakeven (profit $0 ex-fees but net=$0 instead of net<0).
+    # SL at 6bps caps the loss per trade to ~75% of typical loss.
     {
-        "name": "VARIANT-V2 (Maker fee: 0.5bps/leg = 1bps rt)",
+        "name": "VARIANT-V2 (TP=8bps=breakeven SL=6bps max=80ticks)",
         "port": 8002,
         "model": "Llama-3.2",
         "desk": "btc",
@@ -61,18 +68,17 @@ VARIANTS = [
         "det_move_window": "20",
         "hold_cooldown_ticks": "12",
         "regime_filter": "1",
-        "fee_bps": "0.5",
-        "slippage_bps": "0",
-        "hold_extend_ticks": "0",
-        "tp_bps": "0",
-        "sl_bps": "0",
+        "fee_bps": "3",
+        "slippage_bps": "1",
+        "hold_extend_ticks": "80",
+        "tp_bps": "8",               # exactly breakeven on taker fees
+        "sl_bps": "6",
         "reversal_require_recovery": "0",
     },
-    # V3 — Option A/C: extended hold with TP/SL.
-    # On HOLD signal: don't close immediately; wait up to 40 ticks for TP (12 bps) or SL (8 bps).
-    # Lets winners reach profit-target instead of closing at the first neutral tick.
+    # V3 — TP=16bps (2× taker breakeven), SL=8bps, max=120ticks (6 min).
+    # Ambitious: wait for full reversal + profit. Long enough for BTC to complete the move.
     {
-        "name": "VARIANT-V3 (ExtHold: TP=12bps SL=8bps max=40ticks)",
+        "name": "VARIANT-V3 (TP=16bps SL=8bps max=120ticks=6min)",
         "port": 8003,
         "model": "Llama-3.2",
         "desk": "btc",
@@ -90,16 +96,15 @@ VARIANTS = [
         "regime_filter": "1",
         "fee_bps": "3",
         "slippage_bps": "1",
-        "hold_extend_ticks": "40",
-        "tp_bps": "12",
+        "hold_extend_ticks": "120",  # 120 ticks × 3s = 6 min max
+        "tp_bps": "16",              # 2× taker breakeven
         "sl_bps": "8",
         "reversal_require_recovery": "0",
     },
-    # V4 — Options B+A+D combined: maker fees + extended hold + recovery confirmation.
-    # Recovery confirm = only enter when last tick already shows the turn starting (filters falling knives).
-    # Maker fees reduce breakeven to 1 bps rt, so TP=4 bps is well above breakeven.
+    # V4 — Maker fees + TP=6bps (6× maker breakeven), SL=4bps, max=80ticks.
+    # Maker breakeven = 1bps. TP=6bps = large profit relative to cost. Feasible if BTC reverts.
     {
-        "name": "VARIANT-V4 (Maker + ExtHold TP=4bps + RecoveryConfirm)",
+        "name": "VARIANT-V4 (Maker 1bps rt + TP=6bps SL=4bps max=80ticks)",
         "port": 8004,
         "model": "Llama-3.2",
         "desk": "btc",
@@ -115,12 +120,12 @@ VARIANTS = [
         "det_move_window": "20",
         "hold_cooldown_ticks": "12",
         "regime_filter": "1",
-        "fee_bps": "0.5",
+        "fee_bps": "0.5",            # maker: 0.5bps/leg = 1bps rt
         "slippage_bps": "0",
-        "hold_extend_ticks": "40",
-        "tp_bps": "4",
-        "sl_bps": "3",
-        "reversal_require_recovery": "1",
+        "hold_extend_ticks": "80",
+        "tp_bps": "6",               # 6× maker breakeven (1bps)
+        "sl_bps": "4",
+        "reversal_require_recovery": "0",
     },
 ]
 

@@ -758,7 +758,7 @@ class ArenaState:
         self._summary_cache_ttl: float = 30.0  # seconds between full file re-scans
         self._summary_cache = self._default_daily_summary(datetime.now().strftime("%Y-%m-%d"))
         self.tick_count = 0
-        self.auto_select_enabled = AUTO_SELECT_ENABLED
+        self._pending_drift: list[dict] = []  # Post-close drift tracking: {sample_tick, close_price, entry_side, desk}
         self.auto_select_top_n = max(1, AUTO_SELECT_TOP_N)
         self.auto_select_interval_ticks = max(5, AUTO_SELECT_INTERVAL_TICKS)
         self.auto_select_round = 0
@@ -1696,6 +1696,29 @@ class ArenaState:
         elif net_pnl < 0:
             L["losses"] += 1
         L["trades"] += 1
+        # Log trade completion with entry/close prices for drift analysis.
+        entry_side = "LONG" if open_qty > 0 else "SHORT"
+        gross_bps = (gross_pnl / max(L["avg_entry"] * close_qty, 1e-12)) * 10000.0
+        _log_movement({
+            "type": "paper_trade_complete",
+            "desk": desk,
+            "entry_side": entry_side,
+            "entry_price": round(float(L["avg_entry"]), 2),
+            "close_price": round(avg_price, 2),
+            "gross_bps": round(gross_bps, 2),
+            "fee_bps_rt": round(cost_rate * 20000.0, 2),
+            "net_pnl": round(net_pnl, 4),
+            "tick": self.tick_count,
+        })
+        # Enqueue a 5-min (100-tick) post-close drift sample.
+        price_key = "btc" if desk == "btc" else "basket"
+        self._pending_drift.append({
+            "sample_tick": self.tick_count + 100,
+            "close_price": avg_price,
+            "entry_side": entry_side,
+            "desk": desk,
+            "price_key": price_key,
+        })
 
         flip_qty = fill_qty - close_qty
         if flip_qty > 1e-12:
@@ -2835,7 +2858,8 @@ class ArenaState:
         if not self.paper_mode:
             return 0
         # Extended hold mode: when HOLD fires and extend is configured, defer close to per-tick TP/SL monitor.
-        if reason == "hold_signal" and PAPER_HOLD_EXTEND_TICKS > 0 and (PAPER_TP_BPS > 0 or PAPER_SL_BPS > 0):
+        # PAPER_TP_BPS=0 / PAPER_SL_BPS=0 means pure timed exit (no TP/SL, just hold N ticks then close).
+        if reason == "hold_signal" and PAPER_HOLD_EXTEND_TICKS > 0:
             extended = 0
             for symbol in self._desk_symbols(desk):
                 entry = self.paper_ledger.get((model_name, desk, symbol))
