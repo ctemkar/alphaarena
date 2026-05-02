@@ -4153,6 +4153,25 @@ class ArenaState:
             self._refresh_binance_pnl_if_due()
             self._refresh_binance_positions_if_due()
             self._monitor_extended_paper_positions()  # TP/SL/expiry monitor for extended-hold positions
+            # Flush 5-min post-close drift samples.
+            if self._pending_drift:
+                due = [d for d in self._pending_drift if self.tick_count >= d["sample_tick"]]
+                if due:
+                    self._pending_drift = [d for d in self._pending_drift if self.tick_count < d["sample_tick"]]
+                    for d in due:
+                        sample_price = float(self.prices.get(d["price_key"], 0.0) or 0.0)
+                        if sample_price > 0 and d["close_price"] > 0:
+                            drift_bps = ((sample_price - d["close_price"]) / d["close_price"]) * 10000.0
+                            # Positive drift = price went UP after close; for a LONG entry that means momentum.
+                            _log_movement({
+                                "type": "post_close_drift",
+                                "desk": d["desk"],
+                                "entry_side": d["entry_side"],
+                                "close_price": round(d["close_price"], 2),
+                                "sample_price": round(sample_price, 2),
+                                "drift_bps": round(drift_bps, 2),
+                                "momentum": (d["entry_side"] == "LONG" and drift_bps > 0) or (d["entry_side"] == "SHORT" and drift_bps < 0),
+                            })
             self._evaluate_guardrails()
             # Backfill auto-selection whenever either desk is empty.
             should_bootstrap_selection = self.selected_count("btc") == 0 or self.selected_count("basket") == 0
