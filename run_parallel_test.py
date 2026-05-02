@@ -22,37 +22,37 @@ from pathlib import Path
 # If BTC drops 8bps and reverts fully, gross profit = 8bps. Need > 8bps to be net positive.
 # Currently capturing 2.4bps → close 3x too early.
 VARIANTS = [
-    # V1 — Timed exit: hold exactly 80 ticks (4 min) after HOLD signal, no TP/SL.
-    # Tests: does BTC revert enough in 4 min to overcome 8bps fee? Pure time-based.
+    # V1 — Maker fees + threshold=0.05% (achievable: 3 triggers/2h observed).
+    # Window=40ticks(2min) to catch sustained moves near range extremes.
+    # TP=3bps = 3× maker breakeven. SL=2bps. Pure maker economics.
     {
-        "name": "VARIANT-V1 (Timed 80tick=4min hold, taker 8bps)",
+        "name": "VARIANT-V1 (Maker 1bps rt, thr=0.05% win=40, TP=3bps SL=2bps)",
         "port": 8001,
         "model": "Llama-3.2",
         "desk": "btc",
-        "edge": 0.080,
+        "edge": 0.050,
         "persistence": 1,
         "reversal": 1.6,
         "size_usd": 5000,
         "force_close_on_hold": "1",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.080,
+        "momentum_threshold": 0.050,
         "signal_strategy": "deterministic_reversal",
-        "det_move_window": "20",
-        "hold_cooldown_ticks": "12",
+        "det_move_window": "40",     # 40 ticks × 3s = 2 min window
+        "hold_cooldown_ticks": "8",
         "regime_filter": "1",
-        "fee_bps": "3",
-        "slippage_bps": "1",
-        "hold_extend_ticks": "80",   # 80 ticks × 3s = 4 min max
-        "tp_bps": "0",               # no TP — pure timed exit
-        "sl_bps": "0",               # no SL — ride it out
+        "fee_bps": "0.5",            # maker: 0.5bps/leg = 1bps rt
+        "slippage_bps": "0",
+        "hold_extend_ticks": "60",   # hold up to 3 min after HOLD signal
+        "tp_bps": "3",               # 3× maker breakeven
+        "sl_bps": "2",
         "reversal_require_recovery": "0",
     },
-    # V2 — TP=8bps (exactly taker breakeven), SL=6bps, max=80ticks.
-    # Exit the moment we reach breakeven (profit $0 ex-fees but net=$0 instead of net<0).
-    # SL at 6bps caps the loss per trade to ~75% of typical loss.
+    # V2 — Maker fees + threshold=0.08% (highest quality entries, fewer trades).
+    # Window=40ticks(2min). TP=6bps SL=4bps. Wait for genuine extremes.
     {
-        "name": "VARIANT-V2 (TP=8bps=breakeven SL=6bps max=80ticks)",
+        "name": "VARIANT-V2 (Maker 1bps rt, thr=0.08% win=40, TP=6bps SL=4bps)",
         "port": 8002,
         "model": "Llama-3.2",
         "desk": "btc",
@@ -65,66 +65,68 @@ VARIANTS = [
         "momentum_override": "0",
         "momentum_threshold": 0.080,
         "signal_strategy": "deterministic_reversal",
-        "det_move_window": "20",
-        "hold_cooldown_ticks": "12",
-        "regime_filter": "1",
-        "fee_bps": "3",
-        "slippage_bps": "1",
-        "hold_extend_ticks": "80",
-        "tp_bps": "8",               # exactly breakeven on taker fees
-        "sl_bps": "6",
-        "reversal_require_recovery": "0",
-    },
-    # V3 — TP=16bps (2× taker breakeven), SL=8bps, max=120ticks (6 min).
-    # Ambitious: wait for full reversal + profit. Long enough for BTC to complete the move.
-    {
-        "name": "VARIANT-V3 (TP=16bps SL=8bps max=120ticks=6min)",
-        "port": 8003,
-        "model": "Llama-3.2",
-        "desk": "btc",
-        "edge": 0.080,
-        "persistence": 1,
-        "reversal": 1.6,
-        "size_usd": 5000,
-        "force_close_on_hold": "1",
-        "signal_chance": 1.0,
-        "momentum_override": "0",
-        "momentum_threshold": 0.080,
-        "signal_strategy": "deterministic_reversal",
-        "det_move_window": "20",
-        "hold_cooldown_ticks": "12",
-        "regime_filter": "1",
-        "fee_bps": "3",
-        "slippage_bps": "1",
-        "hold_extend_ticks": "120",  # 120 ticks × 3s = 6 min max
-        "tp_bps": "16",              # 2× taker breakeven
-        "sl_bps": "8",
-        "reversal_require_recovery": "0",
-    },
-    # V4 — Maker fees + TP=6bps (6× maker breakeven), SL=4bps, max=80ticks.
-    # Maker breakeven = 1bps. TP=6bps = large profit relative to cost. Feasible if BTC reverts.
-    {
-        "name": "VARIANT-V4 (Maker 1bps rt + TP=6bps SL=4bps max=80ticks)",
-        "port": 8004,
-        "model": "Llama-3.2",
-        "desk": "btc",
-        "edge": 0.080,
-        "persistence": 1,
-        "reversal": 1.6,
-        "size_usd": 5000,
-        "force_close_on_hold": "1",
-        "signal_chance": 1.0,
-        "momentum_override": "0",
-        "momentum_threshold": 0.080,
-        "signal_strategy": "deterministic_reversal",
-        "det_move_window": "20",
+        "det_move_window": "40",     # 40 ticks × 3s = 2 min window
         "hold_cooldown_ticks": "12",
         "regime_filter": "1",
         "fee_bps": "0.5",            # maker: 0.5bps/leg = 1bps rt
         "slippage_bps": "0",
-        "hold_extend_ticks": "80",
-        "tp_bps": "6",               # 6× maker breakeven (1bps)
+        "hold_extend_ticks": "80",   # hold up to 4 min after HOLD signal
+        "tp_bps": "6",               # 6× maker breakeven
         "sl_bps": "4",
+        "reversal_require_recovery": "0",
+    },
+    # V3 — Maker fees + threshold=0.03% (most frequent entries, ~15 triggers/2h).
+    # Small moves but maker breakeven is only 1bps — easy to overcome.
+    # TP=2bps SL=1.5bps: modest per-trade target, high frequency.
+    {
+        "name": "VARIANT-V3 (Maker 1bps rt, thr=0.03% win=20, TP=2bps SL=1.5bps)",
+        "port": 8003,
+        "model": "Llama-3.2",
+        "desk": "btc",
+        "edge": 0.030,
+        "persistence": 1,
+        "reversal": 1.6,
+        "size_usd": 5000,
+        "force_close_on_hold": "1",
+        "signal_chance": 1.0,
+        "momentum_override": "0",
+        "momentum_threshold": 0.030,
+        "signal_strategy": "deterministic_reversal",
+        "det_move_window": "20",     # 20 ticks × 3s = 1 min window
+        "hold_cooldown_ticks": "6",
+        "regime_filter": "0",        # no regime filter — low-vol market IS the target
+        "fee_bps": "0.5",            # maker: 0.5bps/leg = 1bps rt
+        "slippage_bps": "0",
+        "hold_extend_ticks": "40",   # hold up to 2 min after HOLD signal
+        "tp_bps": "2",               # 2× maker breakeven
+        "sl_bps": "1.5",
+        "reversal_require_recovery": "0",
+    },
+    # V4 — Taker fees (8bps rt) + threshold=0.05% + very long hold (10min).
+    # Accepts higher cost but waits for a genuine large reversion.
+    # TP=16bps SL=8bps max=200ticks. Only wins if BTC truly reverts 16bps.
+    {
+        "name": "VARIANT-V4 (Taker 8bps rt, thr=0.05% win=40, TP=16bps SL=8bps max=200t)",
+        "port": 8004,
+        "model": "Llama-3.2",
+        "desk": "btc",
+        "edge": 0.050,
+        "persistence": 1,
+        "reversal": 1.6,
+        "size_usd": 5000,
+        "force_close_on_hold": "1",
+        "signal_chance": 1.0,
+        "momentum_override": "0",
+        "momentum_threshold": 0.050,
+        "signal_strategy": "deterministic_reversal",
+        "det_move_window": "40",     # 40 ticks × 3s = 2 min window
+        "hold_cooldown_ticks": "12",
+        "regime_filter": "1",
+        "fee_bps": "3",
+        "slippage_bps": "1",
+        "hold_extend_ticks": "200",  # hold up to 10 min after HOLD signal
+        "tp_bps": "16",              # 2× taker breakeven; needs real reversion
+        "sl_bps": "8",               # 1× taker breakeven as SL
         "reversal_require_recovery": "0",
     },
 ]
