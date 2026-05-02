@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Parallel test runner - extended-hold duration sweep.
-Insight: reversal IS real (ex_fee positive) but HOLD exits capture only 30% of needed recovery.
-Fix: hold longer (timed exit or TP set just above breakeven).
-Breakeven = 8 bps round-trip (taker). Maker = 1 bps round-trip.
+Parallel test runner - V2 selectivity sweep.
+WINNER from 2h maker sweep: V2 (0.08% threshold, maker, TP=6 SL=4) → net=+$0.86, 2 trades.
+Insight: high selectivity (fewer, higher-quality trades) beats low threshold + high churn.
+V3 churned 42 trades with positive ex_fee but lost $10 to maker fees.
+This sweep explores variations around the V2 winning profile.
 """
 import json
 import os
@@ -13,46 +14,44 @@ import time
 import urllib.request
 from pathlib import Path
 
-# EXTENDED-HOLD DURATION SWEEP
-# Insight from prior runs: ex_fee=+$1.22 on $5k (0.024% captured) but need 0.080% (8bps) to
-# break even on taker fees. Direction is correct but HOLD-triggered exit only captures 30% of
-# the needed recovery. Fix: hold longer (timed or TP just above breakeven).
-#
-# Taker breakeven: 8 bps round-trip. Maker breakeven: 1 bps round-trip.
-# If BTC drops 8bps and reverts fully, gross profit = 8bps. Need > 8bps to be net positive.
-# Currently capturing 2.4bps → close 3x too early.
+# V2 SELECTIVITY SWEEP — all maker fees (0.5bps/leg = 1bps rt)
+# Winner: 0.08% threshold, TP=6bps, SL=4bps, win40 window, hold=4min
+# Hypothesis: selectivity is the key lever. Explore:
+#   V1: exact V2 repeat (control baseline)
+#   V2: wider TP for bigger R:R (TP=10, SL=4 → 2.5:1 ratio)
+#   V3: higher threshold (0.10%) — ultra-selective, only cleanest extremes
+#   V4: mid threshold (0.06%) — slightly more entries than V2, same TP/SL
 VARIANTS = [
-    # V1 — Maker fees + threshold=0.05% (achievable: 3 triggers/2h observed).
-    # Window=40ticks(2min) to catch sustained moves near range extremes.
-    # TP=3bps = 3× maker breakeven. SL=2bps. Pure maker economics.
+    # V1 — Exact repeat of previous winner. Maker 1bps rt, thr=0.08%, TP=6bps SL=4bps.
+    # Control baseline: confirms V2 win was not a fluke.
     {
-        "name": "VARIANT-V1 (Maker 1bps rt, thr=0.05% win=40, TP=3bps SL=2bps)",
+        "name": "VARIANT-V1 (ctrl: Maker thr=0.08% TP=6 SL=4)",
         "port": 8001,
         "model": "Llama-3.2",
         "desk": "btc",
-        "edge": 0.050,
+        "edge": 0.080,
         "persistence": 1,
         "reversal": 1.6,
         "size_usd": 5000,
         "force_close_on_hold": "1",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.050,
+        "momentum_threshold": 0.080,
         "signal_strategy": "deterministic_reversal",
-        "det_move_window": "40",     # 40 ticks × 3s = 2 min window
-        "hold_cooldown_ticks": "8",
+        "det_move_window": "40",     # 2 min window
+        "hold_cooldown_ticks": "12",
         "regime_filter": "1",
-        "fee_bps": "0.5",            # maker: 0.5bps/leg = 1bps rt
+        "fee_bps": "0.5",
         "slippage_bps": "0",
-        "hold_extend_ticks": "60",   # hold up to 3 min after HOLD signal
-        "tp_bps": "3",               # 3× maker breakeven
-        "sl_bps": "2",
+        "hold_extend_ticks": "80",   # 4 min hold
+        "tp_bps": "6",
+        "sl_bps": "4",
         "reversal_require_recovery": "0",
     },
-    # V2 — Maker fees + threshold=0.08% (highest quality entries, fewer trades).
-    # Window=40ticks(2min). TP=6bps SL=4bps. Wait for genuine extremes.
+    # V2 — Wider TP (2.5:1 R:R). Same entry quality as V1 but let winners run further.
+    # TP=10bps (10× maker breakeven). If reversion overshoots, capture more.
     {
-        "name": "VARIANT-V2 (Maker 1bps rt, thr=0.08% win=40, TP=6bps SL=4bps)",
+        "name": "VARIANT-V2 (Maker thr=0.08% TP=10 SL=4, wide-TP)",
         "port": 8002,
         "model": "Llama-3.2",
         "desk": "btc",
@@ -65,68 +64,66 @@ VARIANTS = [
         "momentum_override": "0",
         "momentum_threshold": 0.080,
         "signal_strategy": "deterministic_reversal",
-        "det_move_window": "40",     # 40 ticks × 3s = 2 min window
+        "det_move_window": "40",     # 2 min window
         "hold_cooldown_ticks": "12",
         "regime_filter": "1",
-        "fee_bps": "0.5",            # maker: 0.5bps/leg = 1bps rt
+        "fee_bps": "0.5",
         "slippage_bps": "0",
-        "hold_extend_ticks": "80",   # hold up to 4 min after HOLD signal
-        "tp_bps": "6",               # 6× maker breakeven
+        "hold_extend_ticks": "120",  # 6 min hold — more time to reach wider TP
+        "tp_bps": "10",              # 10× maker breakeven, 2.5:1 R:R
         "sl_bps": "4",
         "reversal_require_recovery": "0",
     },
-    # V3 — Maker fees + threshold=0.03% (most frequent entries, ~15 triggers/2h).
-    # Small moves but maker breakeven is only 1bps — easy to overcome.
-    # TP=2bps SL=1.5bps: modest per-trade target, high frequency.
+    # V3 — Ultra-selective: 0.10% threshold. Only the cleanest extreme moves.
+    # Fewer signals but highest conviction. TP=8bps SL=5bps.
     {
-        "name": "VARIANT-V3 (Maker 1bps rt, thr=0.03% win=20, TP=2bps SL=1.5bps)",
+        "name": "VARIANT-V3 (Maker thr=0.10% TP=8 SL=5, ultra-select)",
         "port": 8003,
         "model": "Llama-3.2",
         "desk": "btc",
-        "edge": 0.030,
+        "edge": 0.100,
         "persistence": 1,
         "reversal": 1.6,
         "size_usd": 5000,
         "force_close_on_hold": "1",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.030,
+        "momentum_threshold": 0.100,
         "signal_strategy": "deterministic_reversal",
-        "det_move_window": "20",     # 20 ticks × 3s = 1 min window
-        "hold_cooldown_ticks": "6",
-        "regime_filter": "0",        # no regime filter — low-vol market IS the target
-        "fee_bps": "0.5",            # maker: 0.5bps/leg = 1bps rt
+        "det_move_window": "40",     # 2 min window
+        "hold_cooldown_ticks": "16",
+        "regime_filter": "1",
+        "fee_bps": "0.5",
         "slippage_bps": "0",
-        "hold_extend_ticks": "40",   # hold up to 2 min after HOLD signal
-        "tp_bps": "2",               # 2× maker breakeven
-        "sl_bps": "1.5",
+        "hold_extend_ticks": "100",  # 5 min hold
+        "tp_bps": "8",
+        "sl_bps": "5",
         "reversal_require_recovery": "0",
     },
-    # V4 — Taker fees (8bps rt) + threshold=0.05% + very long hold (10min).
-    # Accepts higher cost but waits for a genuine large reversion.
-    # TP=16bps SL=8bps max=200ticks. Only wins if BTC truly reverts 16bps.
+    # V4 — Mid threshold 0.06%: more entries than V2 winner but still selective.
+    # Same TP/SL as V1 winner (6/4). Test if relaxing entry quality adds value.
     {
-        "name": "VARIANT-V4 (Taker 8bps rt, thr=0.05% win=40, TP=16bps SL=8bps max=200t)",
+        "name": "VARIANT-V4 (Maker thr=0.06% TP=6 SL=4, mid-select)",
         "port": 8004,
         "model": "Llama-3.2",
         "desk": "btc",
-        "edge": 0.050,
+        "edge": 0.060,
         "persistence": 1,
         "reversal": 1.6,
         "size_usd": 5000,
         "force_close_on_hold": "1",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.050,
+        "momentum_threshold": 0.060,
         "signal_strategy": "deterministic_reversal",
-        "det_move_window": "40",     # 40 ticks × 3s = 2 min window
-        "hold_cooldown_ticks": "12",
+        "det_move_window": "40",     # 2 min window
+        "hold_cooldown_ticks": "10",
         "regime_filter": "1",
-        "fee_bps": "3",
-        "slippage_bps": "1",
-        "hold_extend_ticks": "200",  # hold up to 10 min after HOLD signal
-        "tp_bps": "16",              # 2× taker breakeven; needs real reversion
-        "sl_bps": "8",               # 1× taker breakeven as SL
+        "fee_bps": "0.5",
+        "slippage_bps": "0",
+        "hold_extend_ticks": "80",   # 4 min hold
+        "tp_bps": "6",
+        "sl_bps": "4",
         "reversal_require_recovery": "0",
     },
 ]
