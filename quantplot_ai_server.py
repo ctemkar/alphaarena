@@ -762,6 +762,7 @@ class ArenaState:
         self.auto_select_top_n = max(1, AUTO_SELECT_TOP_N)
         self.auto_select_interval_ticks = max(5, AUTO_SELECT_INTERVAL_TICKS)
         self.auto_select_round = 0
+        self.auto_select_enabled = AUTO_SELECT_ENABLED
         self.hold_replace_streak = max(1, HOLD_REPLACE_STREAK)
         self.hold_cooldown_ticks = max(0, HOLD_COOLDOWN_TICKS)
         self.skip_selected_hold_on_signal = SKIP_SELECTED_HOLD_ON_SIGNAL
