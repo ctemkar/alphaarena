@@ -131,7 +131,7 @@ VARIANTS = [
 DURATION = int(os.getenv("ALPHA_PARALLEL_DURATION", "3600"))
 
 
-def wait_for_server(port: int, max_retries: int = 50, delay: float = 1.0) -> bool:
+def wait_for_server(port: int, max_retries: int = 120, delay: float = 1.0) -> bool:
     for _ in range(max_retries):
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state", timeout=2) as r:
