@@ -15,29 +15,50 @@ import urllib.request
 from pathlib import Path
 
 VARIANTS = [
-    # V1: Reversal basket 0.060% — best ex-fee alpha seen (60-min session), now with hold=1.
+    # V1: Confirmed momentum basket 0.080/3 ticks — fewer, higher-quality entries.
     {
-        "name": "VARIANT-V1 (det_reversal BASKET 0.060 hold=1 regime=1 size=5000)",
+        "name": "VARIANT-V1 (det_confirmed BASKET 0.080 ticks=3 cd=12 hold=1 size=5000)",
         "port": 8001,
         "model": "Llama-3.2",
         "desk": "basket",
-        "edge": 0.060,
+        "edge": 0.080,
         "persistence": 1,
         "reversal": 1.6,
         "size_usd": 5000,
         "force_close_on_hold": "1",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.060,
-        "signal_strategy": "deterministic_reversal",
+        "momentum_threshold": 0.080,
+        "signal_strategy": "deterministic_confirmed",
         "det_move_window": "20",
+        "det_confirmed_min_move_pct": 0.080,
+        "det_confirmed_min_ticks": 3,
         "hold_cooldown_ticks": "12",
-        "regime_filter": "1",
     },
-    # V2: Reversal basket 0.080% — fewer but higher-quality reversal signals.
+    # V2: Confirmed momentum basket 0.100/4 ticks — most selective, near-breakeven in prior test.
     {
-        "name": "VARIANT-V2 (det_reversal BASKET 0.080 hold=1 regime=1 size=5000)",
+        "name": "VARIANT-V2 (det_confirmed BASKET 0.100 ticks=4 cd=15 hold=1 size=5000)",
         "port": 8002,
+        "model": "Llama-3.2",
+        "desk": "basket",
+        "edge": 0.100,
+        "persistence": 1,
+        "reversal": 1.6,
+        "size_usd": 5000,
+        "force_close_on_hold": "1",
+        "signal_chance": 1.0,
+        "momentum_override": "0",
+        "momentum_threshold": 0.100,
+        "signal_strategy": "deterministic_confirmed",
+        "det_move_window": "20",
+        "det_confirmed_min_move_pct": 0.100,
+        "det_confirmed_min_ticks": 4,
+        "hold_cooldown_ticks": "15",
+    },
+    # V3: Reversal basket 0.080 — best ex-fee reversal from the 2h run.
+    {
+        "name": "VARIANT-V3 (det_reversal BASKET 0.080 hold=1 regime=1 size=5000)",
+        "port": 8003,
         "model": "Llama-3.2",
         "desk": "basket",
         "edge": 0.080,
@@ -53,10 +74,10 @@ VARIANTS = [
         "hold_cooldown_ticks": "12",
         "regime_filter": "1",
     },
-    # V3: Confirmed momentum basket 0.060/2 ticks — tonight's best confirmed config.
+    # V4: Confirmed momentum basket 0.060/2 — current best, control arm.
     {
-        "name": "VARIANT-V3 (det_confirmed BASKET 0.060 ticks=2 cd=10 hold=1 size=5000)",
-        "port": 8003,
+        "name": "VARIANT-V4 (det_confirmed BASKET 0.060 ticks=2 cd=10 hold=1 size=5000)",
+        "port": 8004,
         "model": "Llama-3.2",
         "desk": "basket",
         "edge": 0.060,
@@ -72,25 +93,6 @@ VARIANTS = [
         "det_confirmed_min_move_pct": 0.060,
         "det_confirmed_min_ticks": 2,
         "hold_cooldown_ticks": "10",
-    },
-    # V4: Reversal BTC 0.060% — BTC is more volatile overnight; regime filter guards trending.
-    {
-        "name": "VARIANT-V4 (det_reversal BTC 0.060 hold=1 regime=1 size=5000)",
-        "port": 8004,
-        "model": "Llama-3.2",
-        "desk": "btc",
-        "edge": 0.060,
-        "persistence": 1,
-        "reversal": 1.6,
-        "size_usd": 5000,
-        "force_close_on_hold": "1",
-        "signal_chance": 1.0,
-        "momentum_override": "0",
-        "momentum_threshold": 0.060,
-        "signal_strategy": "deterministic_reversal",
-        "det_move_window": "20",
-        "hold_cooldown_ticks": "12",
-        "regime_filter": "1",
     },
 ]
 
@@ -179,15 +181,29 @@ def run_harness(v: dict, result_store: dict) -> None:
     })
     log_path = f"/tmp/alpha_harness_{v['port']}.log"
     print(f"  [{v['name']}] harness started → {log_path}")
-    proc = subprocess.run(
-        ["python3", "run_controlled_paper_session.py"],
-        env=env,
-        capture_output=True,
-        text=True,
-        cwd=Path(__file__).parent,
-        timeout=DURATION + 120,
-    )
-    output = proc.stdout + proc.stderr
+    timeout_slack = max(600, int(DURATION * 0.20))
+    timeout_s = DURATION + timeout_slack
+    status = "ok"
+    try:
+        proc = subprocess.run(
+            ["python3", "run_controlled_paper_session.py"],
+            env=env,
+            capture_output=True,
+            text=True,
+            cwd=Path(__file__).parent,
+            timeout=timeout_s,
+        )
+        output = (proc.stdout or "") + (proc.stderr or "")
+    except subprocess.TimeoutExpired as e:
+        # Keep partial output so START/END/DELTA can still be parsed if present.
+        status = f"timeout({timeout_s}s)"
+        out = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
+        err = e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
+        output = out + err + f"\n[TIMEOUT] harness exceeded {timeout_s}s\n"
+    except Exception as e:
+        status = f"error({type(e).__name__})"
+        output = f"[ERROR] harness failed: {e}\n"
+
     with open(log_path, "w") as f:
         f.write(output)
     # Extract DELTA block
@@ -206,8 +222,8 @@ def run_harness(v: dict, result_store: dict) -> None:
             delta = json.loads("\n".join(buf).split("DELTA", 1)[1].strip())
         except Exception:
             pass
-    result_store[v["name"]] = {"delta": delta, "raw": output}
-    print(f"  [{v['name']}] harness done")
+    result_store[v["name"]] = {"delta": delta, "raw": output, "status": status}
+    print(f"  [{v['name']}] harness done ({status})")
 
 
 def print_results(results: dict) -> None:
@@ -220,6 +236,7 @@ def print_results(results: dict) -> None:
         d = r.get("delta", {})
         ranked.append({
             "name": name,
+            "status": r.get("status", "ok"),
             "net": d.get("delta_net_pnl", 0.0),
             "ex_fee": d.get("delta_ex_fee_pnl", 0.0),
             "trades": d.get("delta_trades", 0),
@@ -232,6 +249,7 @@ def print_results(results: dict) -> None:
         win_rate = (r["wins"] / r["trades"] * 100) if r["trades"] > 0 else 0.0
         label = "WINNER" if i == 0 else f"#{i+1}"
         print(f"\n[{label}] {r['name']}")
+        print(f"  status={r['status']}")
         print(f"  net={r['net']:+.4f}  ex_fee={r['ex_fee']:+.4f}  fee_drag={fee_drag:.4f}")
         print(f"  trades={r['trades']}  wins={r['wins']}  losses={r['losses']}  win_rate={win_rate:.1f}%")
     print("\n" + "=" * 80)
