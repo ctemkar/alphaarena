@@ -14,13 +14,12 @@ import time
 import urllib.request
 from pathlib import Path
 
-# SIZE SWEEP — identical strategy (best from session), only size_usd varies.
-# Strategy: det_reversal BTC 0.080% threshold, 20-tick window, hold=1, regime filter on.
-# Fee breakeven per trade = size_usd * 0.0008 (8 bps round-trip)
+# MULTI-OPTION FEE-DRAG SWEEP — 4 orthogonal approaches to net profitability.
+# Base: det_reversal BTC 0.080% threshold, 20-tick window, hold=1, regime filter, $5k.
 VARIANTS = [
-    # V1 control: $5k  → need >$4  ex-fee/trade to be net profitable
+    # V1 — Control: current best (taker fees 8bps rt, force-close on HOLD immediately).
     {
-        "name": "VARIANT-V1 (det_reversal BTC 0.080 win=20 hold=1 size=5000)",
+        "name": "VARIANT-V1 (Control: taker 8bps rt, force_close)",
         "port": 8001,
         "model": "Llama-3.2",
         "desk": "btc",
@@ -36,17 +35,24 @@ VARIANTS = [
         "det_move_window": "20",
         "hold_cooldown_ticks": "12",
         "regime_filter": "1",
+        "fee_bps": "3",
+        "slippage_bps": "1",
+        "hold_extend_ticks": "0",
+        "tp_bps": "0",
+        "sl_bps": "0",
+        "reversal_require_recovery": "0",
     },
-    # V2: $15k → need >$12 ex-fee/trade
+    # V2 — Option B: maker fee simulation (0.5 bps/leg = 1 bps round-trip).
+    # Tests: would this strategy be profitable if we posted limit orders instead of takers?
     {
-        "name": "VARIANT-V2 (det_reversal BTC 0.080 win=20 hold=1 size=15000)",
+        "name": "VARIANT-V2 (Maker fee: 0.5bps/leg = 1bps rt)",
         "port": 8002,
         "model": "Llama-3.2",
         "desk": "btc",
         "edge": 0.080,
         "persistence": 1,
         "reversal": 1.6,
-        "size_usd": 15000,
+        "size_usd": 5000,
         "force_close_on_hold": "1",
         "signal_chance": 1.0,
         "momentum_override": "0",
@@ -55,17 +61,25 @@ VARIANTS = [
         "det_move_window": "20",
         "hold_cooldown_ticks": "12",
         "regime_filter": "1",
+        "fee_bps": "0.5",
+        "slippage_bps": "0",
+        "hold_extend_ticks": "0",
+        "tp_bps": "0",
+        "sl_bps": "0",
+        "reversal_require_recovery": "0",
     },
-    # V3: $30k → need >$24 ex-fee/trade
+    # V3 — Option A/C: extended hold with TP/SL.
+    # On HOLD signal: don't close immediately; wait up to 40 ticks for TP (12 bps) or SL (8 bps).
+    # Lets winners reach profit-target instead of closing at the first neutral tick.
     {
-        "name": "VARIANT-V3 (det_reversal BTC 0.080 win=20 hold=1 size=30000)",
+        "name": "VARIANT-V3 (ExtHold: TP=12bps SL=8bps max=40ticks)",
         "port": 8003,
         "model": "Llama-3.2",
         "desk": "btc",
         "edge": 0.080,
         "persistence": 1,
         "reversal": 1.6,
-        "size_usd": 30000,
+        "size_usd": 5000,
         "force_close_on_hold": "1",
         "signal_chance": 1.0,
         "momentum_override": "0",
@@ -74,17 +88,25 @@ VARIANTS = [
         "det_move_window": "20",
         "hold_cooldown_ticks": "12",
         "regime_filter": "1",
+        "fee_bps": "3",
+        "slippage_bps": "1",
+        "hold_extend_ticks": "40",
+        "tp_bps": "12",
+        "sl_bps": "8",
+        "reversal_require_recovery": "0",
     },
-    # V4: $50k → need >$40 ex-fee/trade; if net positive here the signal is real and scalable
+    # V4 — Options B+A+D combined: maker fees + extended hold + recovery confirmation.
+    # Recovery confirm = only enter when last tick already shows the turn starting (filters falling knives).
+    # Maker fees reduce breakeven to 1 bps rt, so TP=4 bps is well above breakeven.
     {
-        "name": "VARIANT-V4 (det_reversal BTC 0.080 win=20 hold=1 size=50000)",
+        "name": "VARIANT-V4 (Maker + ExtHold TP=4bps + RecoveryConfirm)",
         "port": 8004,
         "model": "Llama-3.2",
         "desk": "btc",
         "edge": 0.080,
         "persistence": 1,
         "reversal": 1.6,
-        "size_usd": 50000,
+        "size_usd": 5000,
         "force_close_on_hold": "1",
         "signal_chance": 1.0,
         "momentum_override": "0",
@@ -93,6 +115,12 @@ VARIANTS = [
         "det_move_window": "20",
         "hold_cooldown_ticks": "12",
         "regime_filter": "1",
+        "fee_bps": "0.5",
+        "slippage_bps": "0",
+        "hold_extend_ticks": "40",
+        "tp_bps": "4",
+        "sl_bps": "3",
+        "reversal_require_recovery": "1",
     },
 ]
 
@@ -124,10 +152,9 @@ def start_server(v: dict) -> subprocess.Popen:
         "ALPHA_CANARY_ENABLED": "0",
         "ALPHA_BASE_SIGNAL_CHANCE": str(v.get("signal_chance", "1.0")),
         "ALPHA_MIN_PROFIT_EDGE_PCT": "0.03",
-        # Use realistic taker fee: 5 bps per leg = 10 bps round-trip (Binance/Bybit standard)
-        # Realistic perpetual futures fees: 3 bps taker fee + 1 bps slippage = 4 bps per leg = 8 bps round-trip
-        "ALPHA_ANALYTICS_FEE_BPS": "3",
-        "ALPHA_ANALYTICS_SLIPPAGE_BPS": "1",
+        # Fee/slippage per variant: taker default = 3+1 bps/leg; maker simulation = 0.5+0 bps/leg
+        "ALPHA_ANALYTICS_FEE_BPS": str(v.get("fee_bps", "3")),
+        "ALPHA_ANALYTICS_SLIPPAGE_BPS": str(v.get("slippage_bps", "1")),
         # Zero out per-desk edge gate for deterministic strategies; threshold is the sole gate.
         "ALPHA_MIN_PROFIT_EDGE_PCT_BTC": "0.0" if v.get("signal_strategy", "").startswith("deterministic") else "0.05",
         "ALPHA_MIN_PROFIT_EDGE_PCT_BASKET": "0.0" if v.get("signal_strategy", "").startswith("deterministic") else str(v["edge"]),
@@ -143,6 +170,10 @@ def start_server(v: dict) -> subprocess.Popen:
         "ALPHA_LIVE_ORDER_USD": str(v["size_usd"]),
         "ALPHA_MAX_ORDER_USD": str(v["size_usd"]),
         "ALPHA_HARD_MAX_ORDER_USD": str(v["size_usd"]),  # override paper-mode hard cap for size sweep
+        "ALPHA_PAPER_HOLD_EXTEND_TICKS": str(v.get("hold_extend_ticks", "0")),
+        "ALPHA_PAPER_TP_BPS": str(v.get("tp_bps", "0")),
+        "ALPHA_PAPER_SL_BPS": str(v.get("sl_bps", "0")),
+        "ALPHA_REVERSAL_REQUIRE_RECOVERY": str(v.get("reversal_require_recovery", "0")),
         "ALPHA_HOLD_STREAK_MOMENTUM_OVERRIDE_ENABLED": v.get("momentum_override", "1"),
         "ALPHA_HOLD_STREAK_MOMENTUM_OVERRIDE_MIN_STREAK": "1" if v.get("signal_strategy", "").startswith("deterministic") else "3",
         "ALPHA_PAPER_FORCE_CLOSE_ON_HOLD": v.get("force_close_on_hold", "1"),

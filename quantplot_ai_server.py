@@ -208,6 +208,21 @@ except ValueError:
     HOLD_COOLDOWN_TICKS = 12
 HOLD_CLOSES_POSITION = os.getenv("ALPHA_HOLD_CLOSES_POSITION", "0").strip().lower() in {"1", "true", "yes", "on"}
 PAPER_FORCE_CLOSE_ON_HOLD = os.getenv("ALPHA_PAPER_FORCE_CLOSE_ON_HOLD", "1").strip().lower() in {"1", "true", "yes", "on"}
+# Extended hold: when HOLD fires, defer close to per-tick TP/SL/expiry monitor instead of closing immediately.
+try:
+    PAPER_HOLD_EXTEND_TICKS = int(os.getenv("ALPHA_PAPER_HOLD_EXTEND_TICKS", "0"))
+except ValueError:
+    PAPER_HOLD_EXTEND_TICKS = 0
+try:
+    PAPER_TP_BPS = float(os.getenv("ALPHA_PAPER_TP_BPS", "0"))
+except ValueError:
+    PAPER_TP_BPS = 0.0
+try:
+    PAPER_SL_BPS = float(os.getenv("ALPHA_PAPER_SL_BPS", "0"))
+except ValueError:
+    PAPER_SL_BPS = 0.0
+# Recovery confirmation: only enter reversal when last tick confirms the turn has already started.
+REVERSAL_REQUIRE_RECOVERY = os.getenv("ALPHA_REVERSAL_REQUIRE_RECOVERY", "0").strip().lower() in {"1", "true", "yes", "on"}
 DISABLE_BASKET_TIMEOUT_FALLBACK = os.getenv("ALPHA_DISABLE_BASKET_TIMEOUT_FALLBACK", "1").strip().lower() in {"1", "true", "yes", "on"}
 try:
     PAPER_RISK_OFF_MAX_DRAWDOWN_PCT = float(os.getenv("ALPHA_PAPER_RISK_OFF_MAX_DRAWDOWN_PCT", "0.20"))
@@ -2819,6 +2834,27 @@ class ArenaState:
     def _close_paper_ledger_positions_unlocked(self, model_name: str, desk: str, signal_arm: str, reason: str) -> int:
         if not self.paper_mode:
             return 0
+        # Extended hold mode: when HOLD fires and extend is configured, defer close to per-tick TP/SL monitor.
+        if reason == "hold_signal" and PAPER_HOLD_EXTEND_TICKS > 0 and (PAPER_TP_BPS > 0 or PAPER_SL_BPS > 0):
+            extended = 0
+            for symbol in self._desk_symbols(desk):
+                entry = self.paper_ledger.get((model_name, desk, symbol))
+                if not entry:
+                    continue
+                open_qty = float(entry.get("open_qty", 0.0) or 0.0)
+                if abs(open_qty) <= 1e-12:
+                    continue
+                if "ext_until_tick" not in entry:
+                    entry["ext_until_tick"] = self.tick_count + PAPER_HOLD_EXTEND_TICKS
+                    entry["ext_tp_bps"] = PAPER_TP_BPS
+                    entry["ext_sl_bps"] = PAPER_SL_BPS
+                    extended += 1
+            if extended > 0:
+                self.add_log(
+                    f"{model_name} [{desk.upper()}]: extended hold {extended} position(s) "
+                    f"(tp={PAPER_TP_BPS:.1f}bps sl={PAPER_SL_BPS:.1f}bps max={PAPER_HOLD_EXTEND_TICKS}ticks)"
+                )
+            return 0  # per-tick monitor closes when TP/SL hit or expiry reached
         closed = 0
         for symbol in self._desk_symbols(desk):
             entry = self.paper_ledger.get((model_name, desk, symbol))
@@ -2853,6 +2889,69 @@ class ArenaState:
             })
             closed += 1
         return closed
+
+    def _monitor_extended_paper_positions(self) -> None:
+        """Per-tick: close extended-hold paper positions when TP, SL, or max-ticks expiry hit."""
+        if not self.paper_mode:
+            return
+        for (model_name, desk, symbol), entry in list(self.paper_ledger.items()):
+            if "ext_until_tick" not in entry:
+                continue
+            open_qty = float(entry.get("open_qty", 0.0) or 0.0)
+            if abs(open_qty) <= 1e-12:
+                entry.pop("ext_until_tick", None)
+                entry.pop("ext_tp_bps", None)
+                entry.pop("ext_sl_bps", None)
+                continue
+            price_key = _SYMBOL_PRICE_KEY.get(symbol, "btc")
+            mark_price = float(self.prices.get(price_key, 0.0) or 0.0)
+            if mark_price <= 0.0:
+                continue
+            avg_entry = float(entry.get("avg_entry", 0.0) or 0.0)
+            if avg_entry <= 0.0:
+                continue
+            notional = abs(open_qty) * avg_entry
+            unrealized_pnl = (
+                (mark_price - avg_entry) * abs(open_qty) if open_qty > 0
+                else (avg_entry - mark_price) * abs(open_qty)
+            )
+            unrealized_bps = (unrealized_pnl / notional * 10000.0) if notional > 0 else 0.0
+            tp_bps = float(entry.get("ext_tp_bps", 0.0) or 0.0)
+            sl_bps = float(entry.get("ext_sl_bps", 0.0) or 0.0)
+            expiry_tick = int(entry.get("ext_until_tick", 0))
+            should_close = False
+            close_reason = ""
+            if tp_bps > 0 and unrealized_bps >= tp_bps:
+                should_close = True
+                close_reason = f"tp_hit({unrealized_bps:.1f}>={tp_bps:.1f}bps)"
+            elif sl_bps > 0 and unrealized_bps <= -sl_bps:
+                should_close = True
+                close_reason = f"sl_hit({unrealized_bps:.1f}<=-{sl_bps:.1f}bps)"
+            elif self.tick_count >= expiry_tick:
+                should_close = True
+                close_reason = f"ext_expiry(pnl={unrealized_bps:.1f}bps)"
+            if should_close:
+                entry.pop("ext_until_tick", None)
+                entry.pop("ext_tp_bps", None)
+                entry.pop("ext_sl_bps", None)
+                close_side = "SHORT" if open_qty > 0 else "LONG"
+                self._record_paper_fill(
+                    model_name, desk, symbol, close_side, mark_price, abs(open_qty), "control"
+                )
+                _log_movement({
+                    "type": "paper_close",
+                    "model": model_name,
+                    "desk": desk,
+                    "symbol": symbol,
+                    "reason": close_reason,
+                    "side": close_side,
+                    "qty": round(abs(open_qty), 8),
+                    "price": round(mark_price, 4),
+                })
+                self.add_log(
+                    f"{model_name} [{desk.upper()}]: ext-hold closed {close_side} {symbol} "
+                    f"@ ${mark_price:,.2f} — {close_reason}"
+                )
 
     def _reset_internal_slot_pnl_unlocked(self, slot: dict, ref_price: float) -> None:
         slot["balance"] = START_BALANCE
@@ -3648,9 +3747,17 @@ class ArenaState:
                 action = 0  # trending market — stay flat
             # Mean-reversion: bet AGAINST the recent short-term move direction.
             elif det_move_pct >= deterministic_threshold:
-                action = -1  # price moved up → go SHORT (expect reversion)
+                # Recovery confirmation: only SHORT once the last tick has already started to turn down.
+                if not REVERSAL_REQUIRE_RECOVERY or (len(prices_seq) >= 2 and prices_seq[-1] < prices_seq[-2]):
+                    action = -1  # price moved up → go SHORT (expect reversion)
+                else:
+                    action = 0  # move completed but turn not yet confirmed — wait
             elif det_move_pct <= -deterministic_threshold:
-                action = 1   # price moved down → go LONG (expect reversion)
+                # Recovery confirmation: only LONG once the last tick has already started to turn up.
+                if not REVERSAL_REQUIRE_RECOVERY or (len(prices_seq) >= 2 and prices_seq[-1] > prices_seq[-2]):
+                    action = 1   # price moved down → go LONG (expect reversion)
+                else:
+                    action = 0  # move completed but turn not yet confirmed — wait
             else:
                 action = 0
             err = None
@@ -4021,6 +4128,7 @@ class ArenaState:
             self.refresh_prices()
             self._refresh_binance_pnl_if_due()
             self._refresh_binance_positions_if_due()
+            self._monitor_extended_paper_positions()  # TP/SL/expiry monitor for extended-hold positions
             self._evaluate_guardrails()
             # Backfill auto-selection whenever either desk is empty.
             should_bootstrap_selection = self.selected_count("btc") == 0 or self.selected_count("basket") == 0
