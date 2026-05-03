@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-Sequential test runner - momentum/trend-following sweep.
-INSIGHT: deterministic_reversal failed: ex_fee deeply negative = signal direction wrong.
-BTC is trending/drifting, not reverting. Switch to deterministic_momentum (trade WITH move).
-All maker fees (0.5bps/leg = 1bps rt).
+Sequential test runner - counter-trend with confirmation sweep.
+INSIGHT: Both simple reversal AND simple momentum produced negative ex_fee.
+  - Reversal: fires too early, trend continues past entry.
+  - Momentum at 0.03%: fires at exhaustion, price reverses after entry.
+NEW STRATEGY: deterministic_reversal_confirmed
+  - Measure large move over window (threshold 0.08-0.12%).
+  - THEN require 2-3 consecutive opposing ticks before entering.
+  - Only enters AFTER the turn has already started. Tight SL.
 """
 import json
 import os
@@ -13,112 +17,123 @@ import time
 import urllib.request
 from pathlib import Path
 
-# MOMENTUM SWEEP — trade WITH the trend direction (not against it)
-# deterministic_momentum: price up by threshold% → LONG; price down → SHORT.
+# COUNTER-TREND WITH CONFIRMATION SWEEP
+# Strategy: deterministic_reversal_confirmed
+#   1. Measure price change over det_move_window ticks.
+#   2. If move >= threshold%, check last det_confirmed_min_ticks ticks are ALL in opposite direction.
+#   3. Only then enter (turn is already underway). Tight SL just past the extreme.
 # All maker fees (0.5bps/leg = 1bps rt). No regime filter.
 VARIANTS = [
-    # V1 — Momentum, thr=0.05%, 2min window, TP=4bps SL=2bps (2:1 R:R)
+    # V1 — thr=0.08%, 2-tick confirm, window=40ticks(2min), TP=6 SL=3 (2:1)
+    # Moderate threshold, minimal confirmation, balanced target.
     {
-        "name": "VARIANT-V1 (Momentum thr=0.05% win=40 TP=4 SL=2)",
+        "name": "VARIANT-V1 (RevConf thr=0.08% 2ticks TP=6 SL=3)",
         "port": 8001,
         "model": "Llama-3.2",
         "desk": "btc",
-        "edge": 0.050,
+        "edge": 0.080,
         "persistence": 1,
         "reversal": 1.0,
         "size_usd": 5000,
         "force_close_on_hold": "1",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.050,
-        "signal_strategy": "deterministic_momentum",
+        "momentum_threshold": 0.080,
+        "signal_strategy": "deterministic_reversal_confirmed",
         "det_move_window": "40",
-        "hold_cooldown_ticks": "10",
+        "det_confirmed_min_move_pct": 0.080,
+        "det_confirmed_min_ticks": 2,
+        "hold_cooldown_ticks": "12",
         "regime_filter": "0",
         "fee_bps": "0.5",
         "slippage_bps": "0",
-        "hold_extend_ticks": "60",
-        "tp_bps": "4",
-        "sl_bps": "2",
+        "hold_extend_ticks": "80",
+        "tp_bps": "6",
+        "sl_bps": "3",
         "reversal_require_recovery": "0",
     },
-    # V2 — Momentum, thr=0.03%, 1min window, TP=2bps SL=1bps (2:1 R:R)
-    # Lower threshold — more trades, smaller targets.
+    # V2 — thr=0.10%, 2-tick confirm, window=60ticks(3min), TP=8 SL=4 (2:1)
+    # Higher threshold = cleaner extremes. Longer window to catch bigger swings.
     {
-        "name": "VARIANT-V2 (Momentum thr=0.03% win=20 TP=2 SL=1)",
+        "name": "VARIANT-V2 (RevConf thr=0.10% 2ticks TP=8 SL=4)",
         "port": 8002,
         "model": "Llama-3.2",
         "desk": "btc",
-        "edge": 0.030,
+        "edge": 0.100,
         "persistence": 1,
         "reversal": 1.0,
         "size_usd": 5000,
         "force_close_on_hold": "1",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.030,
-        "signal_strategy": "deterministic_momentum",
-        "det_move_window": "20",
-        "hold_cooldown_ticks": "6",
+        "momentum_threshold": 0.100,
+        "signal_strategy": "deterministic_reversal_confirmed",
+        "det_move_window": "60",
+        "det_confirmed_min_move_pct": 0.100,
+        "det_confirmed_min_ticks": 2,
+        "hold_cooldown_ticks": "14",
         "regime_filter": "0",
         "fee_bps": "0.5",
         "slippage_bps": "0",
-        "hold_extend_ticks": "30",
-        "tp_bps": "2",
-        "sl_bps": "1",
+        "hold_extend_ticks": "100",
+        "tp_bps": "8",
+        "sl_bps": "4",
         "reversal_require_recovery": "0",
     },
-    # V3 — Momentum, thr=0.05%, wide TP=8bps SL=3bps (2.7:1 R:R) — let winners run
+    # V3 — thr=0.08%, 3-tick confirm, window=40ticks(2min), TP=5 SL=2.5 (2:1)
+    # Stronger confirmation requirement: 3 ticks already reversing before entry.
     {
-        "name": "VARIANT-V3 (Momentum thr=0.05% win=40 TP=8 SL=3, wide-TP)",
+        "name": "VARIANT-V3 (RevConf thr=0.08% 3ticks TP=5 SL=2.5)",
         "port": 8003,
         "model": "Llama-3.2",
         "desk": "btc",
-        "edge": 0.050,
+        "edge": 0.080,
         "persistence": 1,
         "reversal": 1.0,
         "size_usd": 5000,
         "force_close_on_hold": "1",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.050,
-        "signal_strategy": "deterministic_momentum",
+        "momentum_threshold": 0.080,
+        "signal_strategy": "deterministic_reversal_confirmed",
         "det_move_window": "40",
-        "hold_cooldown_ticks": "10",
+        "det_confirmed_min_move_pct": 0.080,
+        "det_confirmed_min_ticks": 3,
+        "hold_cooldown_ticks": "12",
+        "regime_filter": "0",
+        "fee_bps": "0.5",
+        "slippage_bps": "0",
+        "hold_extend_ticks": "80",
+        "tp_bps": "5",
+        "sl_bps": "2.5",
+        "reversal_require_recovery": "0",
+    },
+    # V4 — thr=0.12%, 2-tick confirm, window=60ticks(3min), TP=10 SL=5 (2:1)
+    # Ultra-selective: only the cleanest extreme swings. Let winners run wide.
+    {
+        "name": "VARIANT-V4 (RevConf thr=0.12% 2ticks TP=10 SL=5)",
+        "port": 8004,
+        "model": "Llama-3.2",
+        "desk": "btc",
+        "edge": 0.120,
+        "persistence": 1,
+        "reversal": 1.0,
+        "size_usd": 5000,
+        "force_close_on_hold": "1",
+        "signal_chance": 1.0,
+        "momentum_override": "0",
+        "momentum_threshold": 0.120,
+        "signal_strategy": "deterministic_reversal_confirmed",
+        "det_move_window": "60",
+        "det_confirmed_min_move_pct": 0.120,
+        "det_confirmed_min_ticks": 2,
+        "hold_cooldown_ticks": "16",
         "regime_filter": "0",
         "fee_bps": "0.5",
         "slippage_bps": "0",
         "hold_extend_ticks": "120",
-        "tp_bps": "8",
-        "sl_bps": "3",
-        "reversal_require_recovery": "0",
-    },
-    # V4 — Confirmed momentum: 3 consecutive ticks same direction before entry.
-    # Reduces false breakouts. TP=3bps SL=1.5bps.
-    {
-        "name": "VARIANT-V4 (Confirmed thr=0.03% 3ticks TP=3 SL=1.5)",
-        "port": 8004,
-        "model": "Llama-3.2",
-        "desk": "btc",
-        "edge": 0.030,
-        "persistence": 1,
-        "reversal": 1.0,
-        "size_usd": 5000,
-        "force_close_on_hold": "1",
-        "signal_chance": 1.0,
-        "momentum_override": "0",
-        "momentum_threshold": 0.030,
-        "signal_strategy": "deterministic_confirmed",
-        "det_move_window": "20",
-        "det_confirmed_min_move_pct": 0.030,
-        "det_confirmed_min_ticks": 3,
-        "hold_cooldown_ticks": "6",
-        "regime_filter": "0",
-        "fee_bps": "0.5",
-        "slippage_bps": "0",
-        "hold_extend_ticks": "40",
-        "tp_bps": "3",
-        "sl_bps": "1.5",
+        "tp_bps": "10",
+        "sl_bps": "5",
         "reversal_require_recovery": "0",
     },
 ]

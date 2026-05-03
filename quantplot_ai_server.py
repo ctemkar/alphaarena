@@ -880,6 +880,11 @@ class ArenaState:
             self.add_log(
                 f"STARTUP: Deterministic reversal (mean-revert) enabled (min_move={DETERMINISTIC_MOMENTUM_MIN_MOVE_PCT:.3f}%)"
             )
+        if SIGNAL_STRATEGY == "deterministic_reversal_confirmed":
+            self.add_log(
+                "STARTUP: Deterministic reversal-confirmed enabled "
+                f"(min_move={DETERMINISTIC_MOMENTUM_MIN_MOVE_PCT:.3f}%, confirm_ticks={DETERMINISTIC_CONFIRMED_MIN_TICKS})"
+            )
 
     @staticmethod
     def _default_daily_summary(day: str) -> dict:
@@ -3797,6 +3802,21 @@ class ArenaState:
                     action = 1
                 elif move_pct <= -confirmed_threshold and all(change < 0 for change in recent_changes):
                     action = -1
+            err = None
+        elif SIGNAL_STRATEGY == "deterministic_reversal_confirmed":
+            # Counter-trend with confirmation: detect a large move over the window, THEN require
+            # N consecutive opposing ticks before entering. Avoids fading moves that keep trending.
+            # Large up move + N down ticks → SHORT. Large down move + N up ticks → LONG.
+            action = 0
+            if len(prices_seq) >= DETERMINISTIC_CONFIRMED_MIN_TICKS + 1:
+                recent_changes = [
+                    prices_seq[idx] - prices_seq[idx - 1]
+                    for idx in range(len(prices_seq) - DETERMINISTIC_CONFIRMED_MIN_TICKS, len(prices_seq))
+                ]
+                if det_move_pct >= deterministic_threshold and all(change < 0 for change in recent_changes):
+                    action = -1  # large up move, now N consecutive down ticks → SHORT (turn confirmed)
+                elif det_move_pct <= -deterministic_threshold and all(change > 0 for change in recent_changes):
+                    action = 1   # large down move, now N consecutive up ticks → LONG (turn confirmed)
             err = None
         else:
             action, err = _ollama_signal(ollama_tag, ref_price, desk_key, history)
