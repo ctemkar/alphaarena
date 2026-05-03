@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Parallel test runner - V2 selectivity sweep.
-WINNER from 2h maker sweep: V2 (0.08% threshold, maker, TP=6 SL=4) → net=+$0.86, 2 trades.
-Insight: high selectivity (fewer, higher-quality trades) beats low threshold + high churn.
-V3 churned 42 trades with positive ex_fee but lost $10 to maker fees.
-This sweep explores variations around the V2 winning profile.
+Sequential test runner - momentum/trend-following sweep.
+INSIGHT: deterministic_reversal failed: ex_fee deeply negative = signal direction wrong.
+BTC is trending/drifting, not reverting. Switch to deterministic_momentum (trade WITH move).
+All maker fees (0.5bps/leg = 1bps rt).
 """
 import json
 import os
@@ -14,116 +13,112 @@ import time
 import urllib.request
 from pathlib import Path
 
-# V2 SELECTIVITY SWEEP — all maker fees (0.5bps/leg = 1bps rt)
-# Winner: 0.08% threshold, TP=6bps, SL=4bps, win40 window, hold=4min
-# Hypothesis: selectivity is the key lever. Explore:
-#   V1: exact V2 repeat (control baseline)
-#   V2: wider TP for bigger R:R (TP=10, SL=4 → 2.5:1 ratio)
-#   V3: higher threshold (0.10%) — ultra-selective, only cleanest extremes
-#   V4: mid threshold (0.06%) — slightly more entries than V2, same TP/SL
+# MOMENTUM SWEEP — trade WITH the trend direction (not against it)
+# deterministic_momentum: price up by threshold% → LONG; price down → SHORT.
+# All maker fees (0.5bps/leg = 1bps rt). No regime filter.
 VARIANTS = [
-    # V1 — Exact repeat of previous winner. Maker 1bps rt, thr=0.08%, TP=6bps SL=4bps.
-    # Control baseline: confirms V2 win was not a fluke.
+    # V1 — Momentum, thr=0.05%, 2min window, TP=4bps SL=2bps (2:1 R:R)
     {
-        "name": "VARIANT-V1 (ctrl: Maker thr=0.08% TP=6 SL=4)",
+        "name": "VARIANT-V1 (Momentum thr=0.05% win=40 TP=4 SL=2)",
         "port": 8001,
         "model": "Llama-3.2",
         "desk": "btc",
-        "edge": 0.080,
+        "edge": 0.050,
         "persistence": 1,
-        "reversal": 1.6,
+        "reversal": 1.0,
         "size_usd": 5000,
         "force_close_on_hold": "1",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.080,
-        "signal_strategy": "deterministic_reversal",
-        "det_move_window": "40",     # 2 min window
-        "hold_cooldown_ticks": "12",
-        "regime_filter": "1",
+        "momentum_threshold": 0.050,
+        "signal_strategy": "deterministic_momentum",
+        "det_move_window": "40",
+        "hold_cooldown_ticks": "10",
+        "regime_filter": "0",
         "fee_bps": "0.5",
         "slippage_bps": "0",
-        "hold_extend_ticks": "80",   # 4 min hold
-        "tp_bps": "6",
-        "sl_bps": "4",
+        "hold_extend_ticks": "60",
+        "tp_bps": "4",
+        "sl_bps": "2",
         "reversal_require_recovery": "0",
     },
-    # V2 — Wider TP (2.5:1 R:R). Same entry quality as V1 but let winners run further.
-    # TP=10bps (10× maker breakeven). If reversion overshoots, capture more.
+    # V2 — Momentum, thr=0.03%, 1min window, TP=2bps SL=1bps (2:1 R:R)
+    # Lower threshold — more trades, smaller targets.
     {
-        "name": "VARIANT-V2 (Maker thr=0.08% TP=10 SL=4, wide-TP)",
+        "name": "VARIANT-V2 (Momentum thr=0.03% win=20 TP=2 SL=1)",
         "port": 8002,
         "model": "Llama-3.2",
         "desk": "btc",
-        "edge": 0.080,
+        "edge": 0.030,
         "persistence": 1,
-        "reversal": 1.6,
+        "reversal": 1.0,
         "size_usd": 5000,
         "force_close_on_hold": "1",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.080,
-        "signal_strategy": "deterministic_reversal",
-        "det_move_window": "40",     # 2 min window
-        "hold_cooldown_ticks": "12",
-        "regime_filter": "1",
+        "momentum_threshold": 0.030,
+        "signal_strategy": "deterministic_momentum",
+        "det_move_window": "20",
+        "hold_cooldown_ticks": "6",
+        "regime_filter": "0",
         "fee_bps": "0.5",
         "slippage_bps": "0",
-        "hold_extend_ticks": "120",  # 6 min hold — more time to reach wider TP
-        "tp_bps": "10",              # 10× maker breakeven, 2.5:1 R:R
-        "sl_bps": "4",
+        "hold_extend_ticks": "30",
+        "tp_bps": "2",
+        "sl_bps": "1",
         "reversal_require_recovery": "0",
     },
-    # V3 — Ultra-selective: 0.10% threshold. Only the cleanest extreme moves.
-    # Fewer signals but highest conviction. TP=8bps SL=5bps.
+    # V3 — Momentum, thr=0.05%, wide TP=8bps SL=3bps (2.7:1 R:R) — let winners run
     {
-        "name": "VARIANT-V3 (Maker thr=0.10% TP=8 SL=5, ultra-select)",
+        "name": "VARIANT-V3 (Momentum thr=0.05% win=40 TP=8 SL=3, wide-TP)",
         "port": 8003,
         "model": "Llama-3.2",
         "desk": "btc",
-        "edge": 0.100,
+        "edge": 0.050,
         "persistence": 1,
-        "reversal": 1.6,
+        "reversal": 1.0,
         "size_usd": 5000,
         "force_close_on_hold": "1",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.100,
-        "signal_strategy": "deterministic_reversal",
-        "det_move_window": "40",     # 2 min window
-        "hold_cooldown_ticks": "16",
-        "regime_filter": "1",
+        "momentum_threshold": 0.050,
+        "signal_strategy": "deterministic_momentum",
+        "det_move_window": "40",
+        "hold_cooldown_ticks": "10",
+        "regime_filter": "0",
         "fee_bps": "0.5",
         "slippage_bps": "0",
-        "hold_extend_ticks": "100",  # 5 min hold
+        "hold_extend_ticks": "120",
         "tp_bps": "8",
-        "sl_bps": "5",
+        "sl_bps": "3",
         "reversal_require_recovery": "0",
     },
-    # V4 — Mid threshold 0.06%: more entries than V2 winner but still selective.
-    # Same TP/SL as V1 winner (6/4). Test if relaxing entry quality adds value.
+    # V4 — Confirmed momentum: 3 consecutive ticks same direction before entry.
+    # Reduces false breakouts. TP=3bps SL=1.5bps.
     {
-        "name": "VARIANT-V4 (Maker thr=0.06% TP=6 SL=4, mid-select)",
+        "name": "VARIANT-V4 (Confirmed thr=0.03% 3ticks TP=3 SL=1.5)",
         "port": 8004,
         "model": "Llama-3.2",
         "desk": "btc",
-        "edge": 0.060,
+        "edge": 0.030,
         "persistence": 1,
-        "reversal": 1.6,
+        "reversal": 1.0,
         "size_usd": 5000,
         "force_close_on_hold": "1",
         "signal_chance": 1.0,
         "momentum_override": "0",
-        "momentum_threshold": 0.060,
-        "signal_strategy": "deterministic_reversal",
-        "det_move_window": "40",     # 2 min window
-        "hold_cooldown_ticks": "10",
-        "regime_filter": "1",
+        "momentum_threshold": 0.030,
+        "signal_strategy": "deterministic_confirmed",
+        "det_move_window": "20",
+        "det_confirmed_min_move_pct": 0.030,
+        "det_confirmed_min_ticks": 3,
+        "hold_cooldown_ticks": "6",
+        "regime_filter": "0",
         "fee_bps": "0.5",
         "slippage_bps": "0",
-        "hold_extend_ticks": "80",   # 4 min hold
-        "tp_bps": "6",
-        "sl_bps": "4",
+        "hold_extend_ticks": "40",
+        "tp_bps": "3",
+        "sl_bps": "1.5",
         "reversal_require_recovery": "0",
     },
 ]
