@@ -14,7 +14,6 @@ All maker fees (0.5bps/leg = 1bps rt).
 import json
 import os
 import subprocess
-import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -198,107 +197,129 @@ def wait_for_server(port: int, max_retries: int = 120) -> bool:
     return False
 
 
-def run_harness(v: dict, results: dict):
-    log = f"/tmp/alpha_harness_{v['port']}.log"
-    harness = Path(__file__).parent / "run_controlled_paper_session.py"
+def run_harness(v: dict, result_store: dict) -> None:
     env = build_env(v)
-    env["ALPHA_SESSION_DURATION"] = str(DURATION)
-    print(f"  ✓ Server up. Running {DURATION}s harness...")
-    print(f"  [{v['name']}] harness started → {log}")
+    desk = v.get("desk", "basket")
+    env.update({
+        "ALPHA_CONTROLLED_PORT": str(v["port"]),
+        "ALPHA_CONTROLLED_DURATION_SECONDS": str(DURATION),
+        "ALPHA_CONTROLLED_POLL_SECONDS": "15",
+        "ALPHA_CONTROLLED_ENABLE_BTC": "1" if desk == "btc" else "0",
+        "ALPHA_CONTROLLED_ENABLE_BASKET": "0" if desk == "btc" else "1",
+        "ALPHA_CONTROLLED_BTC_MODEL": v["model"] if desk == "btc" else "",
+        "ALPHA_CONTROLLED_BASKET_MODEL": v["model"] if desk != "btc" else "",
+    })
+    log_path = f"/tmp/alpha_harness_{v['port']}.log"
+    print(f"  [{v['name']}] harness started → {log_path}")
+    timeout_slack = max(600, int(DURATION * 0.20))
+    timeout_s = DURATION + timeout_slack
+    status = "ok"
     try:
-        subprocess.run(
-            ["python3", str(harness), "--port", str(v["port"]), "--duration", str(DURATION)],
+        proc = subprocess.run(
+            ["python3", "run_controlled_paper_session.py"],
             env=env,
-            stdout=open(log, "w"),
-            stderr=subprocess.STDOUT,
-            timeout=DURATION + 120,
+            capture_output=True,
+            text=True,
+            cwd=Path(__file__).parent,
+            timeout=timeout_s,
         )
-        status = "ok"
-    except subprocess.TimeoutExpired:
-        status = "timeout"
+        output = (proc.stdout or "") + (proc.stderr or "")
+    except subprocess.TimeoutExpired as e:
+        status = f"timeout({timeout_s}s)"
+        out = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
+        err = e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
+        output = out + err + f"\n[TIMEOUT] harness exceeded {timeout_s}s\n"
+    except Exception as e:
+        status = f"error({type(e).__name__})"
+        output = f"[ERROR] harness failed: {e}\n"
+
+    with open(log_path, "w") as f:
+        f.write(output)
+    # Extract DELTA block
+    delta = {}
+    in_delta = False
+    buf = []
+    for line in output.splitlines():
+        if line.strip().startswith("DELTA"):
+            in_delta = True
+        if in_delta:
+            buf.append(line)
+            if line.strip() == "}":
+                break
+    if buf:
+        try:
+            delta = json.loads("\n".join(buf).split("DELTA", 1)[1].strip())
+        except Exception:
+            pass
+    result_store[v["name"]] = {"delta": delta, "raw": output, "status": status}
     print(f"  [{v['name']}] harness done ({status})")
 
-    # Parse final result from harness log
-    net, ex_fee, trades, wins, losses = 0.0, 0.0, 0, 0, 0
-    try:
-        with open(log) as f:
-            data = json.load(f) if log.endswith(".json") else None
-        # Parse last JSON block from log
-        import re
-        text = open(log).read()
-        blocks = re.findall(r'\{[^{}]*"net_pnl"[^{}]*\}', text, re.DOTALL)
-        if blocks:
-            last = json.loads(blocks[-1])
-            net = last.get("net_pnl", 0)
-            ex_fee = last.get("ex_fee_pnl", 0)
-            trades = last.get("total_trades", 0)
-            wins = last.get("total_wins", 0)
-            losses = last.get("total_losses", 0)
-    except Exception:
-        pass
 
-    results[v["name"]] = {
-        "status": status,
-        "net": net,
-        "ex_fee": ex_fee,
-        "trades": trades,
-        "wins": wins,
-        "losses": losses,
-        "port": v["port"],
-    }
-
-
-def print_results(results: dict):
+def print_results(results: dict) -> None:
+    import datetime
     print("\n" + "=" * 80)
     print("FINAL RESULTS")
-    print("=" * 80 + "\n")
-    sorted_r = sorted(results.items(), key=lambda x: x[1].get("net", -999), reverse=True)
-    labels = ["[WINNER]"] + [f"[#{i}]" for i in range(2, len(sorted_r) + 1)]
-    for label, (name, r) in zip(labels, sorted_r):
-        wr = (r["wins"] / r["trades"] * 100) if r["trades"] else 0.0
-        print(f"{label} {name}")
+    print("=" * 80)
+    ranked = []
+    for name, r in results.items():
+        d = r.get("delta", {})
+        ranked.append({
+            "name": name,
+            "status": r.get("status", "ok"),
+            "net": d.get("delta_net_pnl", 0.0),
+            "ex_fee": d.get("delta_ex_fee_pnl", 0.0),
+            "trades": d.get("delta_trades", 0),
+            "wins": d.get("delta_wins", 0),
+            "losses": d.get("delta_losses", 0),
+        })
+    ranked.sort(key=lambda x: x["net"], reverse=True)
+    for i, r in enumerate(ranked):
+        fee_drag = r["ex_fee"] - r["net"]
+        win_rate = (r["wins"] / r["trades"] * 100) if r["trades"] > 0 else 0.0
+        label = "WINNER" if i == 0 else f"#{i+1}"
+        print(f"\n[{label}] {r['name']}")
         print(f"  status={r['status']}")
-        print(f"  net={r['net']:+.4f}  ex_fee={r['ex_fee']:+.4f}  fee_drag={abs(r['net']-r['ex_fee']):.4f}")
-        print(f"  trades={r['trades']}  wins={r['wins']}  losses={r['losses']}  win_rate={wr:.1f}%")
-        print()
-
-    import datetime
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    out = f"/tmp/sweep_result_{ts}.json"
-    with open(out, "w") as f:
-        json.dump(results, f, indent=2)
-    print(f"Results saved → {out}")
+        print(f"  net={r['net']:+.4f}  ex_fee={r['ex_fee']:+.4f}  fee_drag={fee_drag:.4f}")
+        print(f"  trades={r['trades']}  wins={r['wins']}  losses={r['losses']}  win_rate={win_rate:.1f}%")
     print("\n" + "=" * 80)
     print("V3-FIX SWEEP COMPLETE")
     print("=" * 80)
+
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    summary_path = f"/tmp/sweep_result_{ts}.json"
+    with open(summary_path, "w") as f:
+        json.dump({"timestamp": ts, "duration_s": DURATION, "ranked": ranked}, f, indent=2)
+    with open("/tmp/sweep_latest_result.json", "w") as f:
+        json.dump({"timestamp": ts, "duration_s": DURATION, "ranked": ranked}, f, indent=2)
+    print(f"\nResults saved → {summary_path}")
 
 
 def main():
     total = len(VARIANTS)
     print("=" * 80)
     print(f"V3-FIX SEQUENTIAL SWEEP  ({total} variants × {DURATION}s each = {total * DURATION // 60} min total)")
-    print("=" * 80 + "\n")
+    print("=" * 80)
 
     os.system("pkill -f quantplot_ai_server.py 2>/dev/null; sleep 1")
-    results = {}
 
+    results = {}
     for i, v in enumerate(VARIANTS, 1):
-        print(f"[{i}/{total}] Starting {v['name']} on port {v['port']}...")
+        print(f"\n[{i}/{total}] Starting {v['name']} on port {v['port']}...")
         os.system(f"lsof -ti:{v['port']} 2>/dev/null | xargs kill -9 2>/dev/null; sleep 1")
         proc = start_server(v)
         if not wait_for_server(v["port"]):
+            print(f"  ✗ Server failed to start. Skipping.")
             proc.terminate()
-            results[v["name"]] = {"status": "server_failed", "net": 0, "ex_fee": 0,
-                                   "trades": 0, "wins": 0, "losses": 0, "port": v["port"]}
+            results[v["name"]] = {"delta": {}, "raw": "", "status": "server_failed"}
             continue
-        run_harness(v, results)
-        proc.terminate()
+        print(f"  ✓ Server up. Running {DURATION}s harness...")
         try:
+            run_harness(v, results)
+        finally:
+            proc.terminate()
             proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        os.system(f"lsof -ti:{v['port']} 2>/dev/null | xargs kill -9 2>/dev/null")
-        print(f"  Server stopped.\n")
+            os.system(f"lsof -ti:{v['port']} 2>/dev/null | xargs kill -9 2>/dev/null")
+            print(f"  Server stopped.")
 
     print_results(results)
 
