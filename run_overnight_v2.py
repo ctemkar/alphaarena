@@ -54,6 +54,9 @@ def pid_alive(pid: int) -> bool:
 
 
 def wait_for_sweep(pid: int) -> None:
+    if pid <= 0:
+        print("No sweep PID to wait for. Starting immediately.")
+        return
     print(f"Waiting for sweep PID {pid} to finish...")
     while pid_alive(pid):
         time.sleep(15)
