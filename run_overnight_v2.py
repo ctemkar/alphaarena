@@ -17,6 +17,8 @@ WATCH_PID = int(os.getenv("WATCH_PID", "0"))
 DURATION = int(os.getenv("ALPHA_OVERNIGHT_DURATION", str(12 * 3600)))
 SESSION_MAX = int(os.getenv("ALPHA_SESSION_MAX", str(2 * 3600)))
 SUPERVISOR_CHUNK_SECONDS = int(os.getenv("ALPHA_SUPERVISOR_CHUNK", "300"))
+KILL_SWITCH_THRESHOLD = float(os.getenv("ALPHA_KILL_SWITCH_THRESHOLD", "-15.0"))
+KILL_SWITCH_TRADE_GATE = int(os.getenv("ALPHA_KILL_SWITCH_TRADE_GATE", "20"))
 PORT = 8001
 STATUS_PATH = "/tmp/overnight_status.json"
 
@@ -324,6 +326,16 @@ def main():
 
             save_status(totals, session, int(time.time() - wall_start), DURATION)
 
+            # Check kill-switch: if net <= threshold and trades < gate, stop early
+            if totals["trades"] < KILL_SWITCH_TRADE_GATE and totals["net"] <= KILL_SWITCH_THRESHOLD:
+                print(
+                    f"\n[KILL-SWITCH] Net {totals['net']:+.4f} <= {KILL_SWITCH_THRESHOLD:.1f} threshold "
+                    f"with only {totals['trades']} trades (< {KILL_SWITCH_TRADE_GATE} gate). "
+                    f"Stopping early to conserve overnight time."
+                )
+                session_remaining = 0
+                break
+
         proc.terminate()
         try:
             proc.wait(timeout=5)
@@ -342,13 +354,16 @@ def main():
     trades = totals["trades"]
     win_rate = (totals["wins"] / trades * 100) if trades > 0 else 0.0
     fee_drag = totals["ex_fee"] - totals["net"]
+    stopped_early = trades < KILL_SWITCH_TRADE_GATE and totals["net"] <= KILL_SWITCH_THRESHOLD
     print("\n" + "=" * 80)
     print("OVERNIGHT FINAL RESULT")
     print("=" * 80)
+    if stopped_early:
+        print("[EARLY STOP via kill-switch]")
     print(f"  net={totals['net']:+.4f}  ex_fee={totals['ex_fee']:+.4f}  fee_drag={fee_drag:.4f}")
     print(f"  trades={trades}  wins={totals['wins']}  losses={totals['losses']}  win_rate={win_rate:.1f}%")
     print(f"  sessions={session}  crashes={crashes}")
-    print(f"  verdict={'PROFITABLE' if totals['net'] > 0 else 'LOSS'}")
+    print(f"  verdict={'PROFITABLE' if totals['net'] > 0 else 'LOSS (below threshold)' if stopped_early else 'LOSS'}")
     print("=" * 80)
 
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
