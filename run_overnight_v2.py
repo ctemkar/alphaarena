@@ -232,11 +232,13 @@ def main():
     print("=" * 80)
     print(f"OVERNIGHT SUPERVISOR: {v['name']}")
     print(f"Total: {DURATION//3600}h  |  Session max: {SESSION_MAX//3600}h  |  Chunk: {SUPERVISOR_CHUNK_SECONDS}s  |  End: ~{end_dt.strftime('%H:%M')} Bangkok")
+    print(f"Kill-switch: stop if net <= {KILL_SWITCH_THRESHOLD:.1f} before {KILL_SWITCH_TRADE_GATE} trades")
     print("=" * 80)
 
     kill_server(PORT)
+    kill_switch_fired = False
 
-    while time.time() < wall_end:
+    while time.time() < wall_end and not kill_switch_fired:
         remaining = int(wall_end - time.time())
         if remaining < 60:
             break
@@ -333,6 +335,7 @@ def main():
                     f"with only {totals['trades']} trades (< {KILL_SWITCH_TRADE_GATE} gate). "
                     f"Stopping early to conserve overnight time."
                 )
+                kill_switch_fired = True
                 session_remaining = 0
                 break
 
