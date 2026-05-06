@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
 """
-Overnight validation run of wide-SL V2 config (thr=0.03%, TP=10bps, SL=6bps).
-This is the config that went +$5.13 in the May 4 wide-SL sweep.
-Runs for 12h to accumulate enough trades for statistical confidence (target 20+).
-Waits for PID 39020 (wide-SL sweep) to finish first.
+Overnight validation run - V2 config (thr=0.03%, TP=10bps, SL=6bps).
+SUPERVISOR mode: automatically restarts server+harness on crash.
+Runs until total wall-clock DURATION expires. Accumulates P&L across restarts.
 """
+import datetime
 import json
 import os
+import re
 import subprocess
-import sys
 import time
 import urllib.request
 from pathlib import Path
 
-WATCH_PID = int(os.getenv("WATCH_PID", "39020"))
-DURATION = int(os.getenv("ALPHA_OVERNIGHT_DURATION", str(12 * 3600)))  # 12h default
+WATCH_PID = int(os.getenv("WATCH_PID", "0"))
+DURATION = int(os.getenv("ALPHA_OVERNIGHT_DURATION", str(12 * 3600)))
+SESSION_MAX = int(os.getenv("ALPHA_SESSION_MAX", str(2 * 3600)))
+SUPERVISOR_CHUNK_SECONDS = int(os.getenv("ALPHA_SUPERVISOR_CHUNK", "300"))
 PORT = 8001
+STATUS_PATH = "/tmp/overnight_status.json"
 
 VARIANT = {
     "name": "OVERNIGHT-V2 (thr=0.03% TP=10 SL=6)",
@@ -27,7 +30,6 @@ VARIANT = {
     "reversal": 1.0,
     "size_usd": 5000,
     "force_close_on_hold": "1",
-    "signal_chance": 1.0,
     "momentum_override": "0",
     "momentum_threshold": 0.030,
     "signal_strategy": "deterministic_reversal",
@@ -43,24 +45,30 @@ VARIANT = {
 }
 
 
-def pid_alive(pid: int) -> bool:
+def pid_alive(pid):
+    if pid <= 0:
+        return False
     try:
         os.kill(pid, 0)
         return True
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         return False
-    except PermissionError:
-        return True
 
 
-def wait_for_sweep(pid: int) -> None:
-    if pid <= 0:
-        print("No sweep PID to wait for. Starting immediately.")
-        return
-    print(f"Waiting for sweep PID {pid} to finish...")
-    while pid_alive(pid):
-        time.sleep(15)
-    print("Sweep done. Starting overnight run.")
+def kill_server(port):
+    os.system(f"lsof -ti:{port} 2>/dev/null | xargs kill -9 2>/dev/null")
+    os.system("pkill -f quantplot_ai_server.py 2>/dev/null")
+    time.sleep(2)
+
+
+def start_server(v):
+    return subprocess.Popen(
+        ["python3", "quantplot_ai_server.py"],
+        env=build_env(v),
+        cwd=Path(__file__).parent,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 def build_env(v: dict) -> dict:
@@ -101,7 +109,7 @@ def build_env(v: dict) -> dict:
     return env
 
 
-def wait_for_server(port: int, timeout: int = 30) -> bool:
+def wait_for_server(port, timeout=40):
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -112,79 +120,39 @@ def wait_for_server(port: int, timeout: int = 30) -> bool:
     return False
 
 
-def main():
-    import datetime
-
-    # Wait for current sweep to finish
-    if pid_alive(WATCH_PID):
-        wait_for_sweep(WATCH_PID)
-    else:
-        print(f"PID {WATCH_PID} already done. Starting immediately.")
-
-    # Kill any leftover servers
-    os.system("pkill -f quantplot_ai_server.py 2>/dev/null; sleep 2")
-    os.system(f"lsof -ti:{PORT} 2>/dev/null | xargs kill -9 2>/dev/null; sleep 1")
-
-    v = VARIANT
-    start_bkk = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    end_bkk = (datetime.datetime.now() + datetime.timedelta(seconds=DURATION)).strftime("%H:%M:%S")
-    print("=" * 80)
-    print(f"OVERNIGHT RUN: {v['name']}")
-    print(f"Start: {start_bkk} Bangkok  |  Duration: {DURATION//3600}h  |  End: ~{end_bkk} Bangkok")
-    print("=" * 80)
-
+def run_session(v, session_dur, session_num):
     env = build_env(v)
-    proc = subprocess.Popen(
-        ["python3", "quantplot_ai_server.py"],
-        env=env,
-        cwd=Path(__file__).parent,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    print(f"Server started (pid {proc.pid}) on port {PORT}")
-
-    if not wait_for_server(PORT, timeout=30):
-        print("ERROR: server failed to start")
-        proc.terminate()
-        sys.exit(1)
-    print("Server ready. Running harness...")
-
-    harness_env = build_env(v)
-    harness_env.update({
-        "ALPHA_CONTROLLED_PORT": str(PORT),
-        "ALPHA_CONTROLLED_DURATION_SECONDS": str(DURATION),
+    env.update({
+        "ALPHA_CONTROLLED_PORT": str(v["port"]),
+        "ALPHA_CONTROLLED_DURATION_SECONDS": str(session_dur),
         "ALPHA_CONTROLLED_POLL_SECONDS": "30",
         "ALPHA_CONTROLLED_ENABLE_BTC": "1",
         "ALPHA_CONTROLLED_ENABLE_BASKET": "0",
         "ALPHA_CONTROLLED_BTC_MODEL": v["model"],
         "ALPHA_CONTROLLED_BASKET_MODEL": "",
     })
-
-    log_path = f"/tmp/overnight_harness_{PORT}.log"
-    timeout_s = DURATION + 900
+    session_log = f"/tmp/overnight_session_{session_num}.log"
     try:
         result = subprocess.run(
             ["python3", "run_controlled_paper_session.py"],
-            env=harness_env,
+            env=env,
             capture_output=True,
             text=True,
             cwd=Path(__file__).parent,
-            timeout=timeout_s,
+            timeout=session_dur + 300,
         )
         output = (result.stdout or "") + (result.stderr or "")
     except subprocess.TimeoutExpired as e:
         out = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
         err = e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
-        output = out + err + f"\n[TIMEOUT]\n"
+        output = out + err + "\n[SESSION TIMEOUT]\n"
+    except Exception as ex:
+        output = f"[SESSION ERROR] {ex}\n"
 
-    with open(log_path, "w") as f:
+    with open(session_log, "w") as f:
         f.write(output)
 
-    proc.terminate()
-    proc.wait(timeout=5)
-
-    # Parse result
-    delta = {}
+    # Try DELTA block first
     buf = []
     in_delta = False
     for line in output.splitlines():
@@ -196,42 +164,206 @@ def main():
                 break
     if buf:
         try:
-            delta = json.loads("\n".join(buf).split("DELTA", 1)[1].strip())
+            return json.loads("\n".join(buf).split("DELTA", 1)[1].strip())
         except Exception:
             pass
 
-    net = delta.get("delta_net_pnl", 0.0)
-    ex_fee = delta.get("delta_ex_fee_pnl", 0.0)
-    trades = delta.get("delta_trades", 0)
-    wins = delta.get("delta_wins", 0)
-    losses = delta.get("delta_losses", 0)
-    win_rate = (wins / trades * 100) if trades > 0 else 0.0
-    fee_drag = ex_fee - net
+    # Fallback: last net= poll line (covers crash before DELTA is written)
+    last = {}
+    for line in output.splitlines():
+        if "net=" in line and "trades=" in line:
+            try:
+                nm = re.search(r"net=([+-]?\d+\.\d+)", line)
+                em = re.search(r"ex_fee=([+-]?\d+\.\d+)", line)
+                tm = re.search(r"trades=(\d+)", line)
+                wm = re.search(r"wins=(\d+)", line)
+                lm = re.search(r"losses=(\d+)", line)
+                if nm:
+                    last = {
+                        "delta_net_pnl": float(nm.group(1)),
+                        "delta_ex_fee_pnl": float(em.group(1)) if em else 0.0,
+                        "delta_trades": int(tm.group(1)) if tm else 0,
+                        "delta_wins": int(wm.group(1)) if wm else 0,
+                        "delta_losses": int(lm.group(1)) if lm else 0,
+                    }
+            except Exception:
+                pass
+    return last
 
+
+def save_status(totals, session, wall_elapsed, wall_total):
+    trades = totals["trades"]
+    win_rate = (totals["wins"] / trades * 100) if trades > 0 else 0.0
+    status = {
+        "ts": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "session": session,
+        "wall_elapsed_min": wall_elapsed // 60,
+        "wall_remaining_min": max(0, (wall_total - wall_elapsed) // 60),
+        "net": round(totals["net"], 4),
+        "ex_fee": round(totals["ex_fee"], 4),
+        "trades": trades,
+        "wins": totals["wins"],
+        "losses": totals["losses"],
+        "win_rate_pct": round(win_rate, 1),
+    }
+    with open(STATUS_PATH, "w") as f:
+        json.dump(status, f, indent=2)
+    print(f"  CUMULATIVE: net={totals['net']:+.4f}  ex_fee={totals['ex_fee']:+.4f}  "
+          f"trades={trades}  wins={totals['wins']}  losses={totals['losses']}  "
+          f"win_rate={win_rate:.1f}%  elapsed={wall_elapsed//60}min")
+
+
+def main():
+    if WATCH_PID > 0 and pid_alive(WATCH_PID):
+        print(f"Waiting for PID {WATCH_PID} to finish...")
+        while pid_alive(WATCH_PID):
+            time.sleep(15)
+
+    v = VARIANT
+    wall_start = time.time()
+    wall_end = wall_start + DURATION
+    session = 0
+    totals = {"net": 0.0, "ex_fee": 0.0, "trades": 0, "wins": 0, "losses": 0}
+    crashes = 0
+
+    end_dt = datetime.datetime.now() + datetime.timedelta(seconds=DURATION)
+    print("=" * 80)
+    print(f"OVERNIGHT SUPERVISOR: {v['name']}")
+    print(f"Total: {DURATION//3600}h  |  Session max: {SESSION_MAX//3600}h  |  Chunk: {SUPERVISOR_CHUNK_SECONDS}s  |  End: ~{end_dt.strftime('%H:%M')} Bangkok")
+    print("=" * 80)
+
+    kill_server(PORT)
+
+    while time.time() < wall_end:
+        remaining = int(wall_end - time.time())
+        if remaining < 60:
+            break
+
+        session_dur = min(SESSION_MAX, remaining)
+        session += 1
+        print(f"\n[Session {session}] {session_dur//60}min session | {remaining//60}min total remaining")
+
+        proc = start_server(v)
+        print(f"  Server pid={proc.pid}")
+
+        if not wait_for_server(PORT, timeout=40):
+            print("  FAILED to start server - retrying in 30s...")
+            proc.terminate()
+            kill_server(PORT)
+            crashes += 1
+            time.sleep(30)
+            continue
+
+        print("  Server ready. Running chunked harness with mid-session crash recovery...")
+
+        session_remaining = session_dur
+        chunk_index = 0
+        session_net = 0.0
+        session_ex_fee = 0.0
+        session_trades = 0
+        session_wins = 0
+        session_losses = 0
+
+        while session_remaining > 0 and time.time() < wall_end:
+            chunk_index += 1
+            wall_remaining = int(wall_end - time.time())
+            chunk_dur = min(SUPERVISOR_CHUNK_SECONDS, session_remaining, wall_remaining)
+            if chunk_dur < 30:
+                break
+
+            # If the server died while the harness wasn't running, restart immediately.
+            if proc.poll() is not None:
+                crashes += 1
+                print("  Server died mid-session; restarting now...")
+                kill_server(PORT)
+                proc = start_server(v)
+                if not wait_for_server(PORT, timeout=40):
+                    print("  Restart failed; retrying in 10s...")
+                    crashes += 1
+                    time.sleep(10)
+                    continue
+
+            delta = run_session(v, chunk_dur, f"{session}_{chunk_index}")
+
+            net = delta.get("delta_net_pnl", 0.0)
+            ex_fee = delta.get("delta_ex_fee_pnl", 0.0)
+            trades = delta.get("delta_trades", 0)
+            wins = delta.get("delta_wins", 0)
+            losses = delta.get("delta_losses", 0)
+
+            session_net += net
+            session_ex_fee += ex_fee
+            session_trades += trades
+            session_wins += wins
+            session_losses += losses
+
+            totals["net"] += net
+            totals["ex_fee"] += ex_fee
+            totals["trades"] += trades
+            totals["wins"] += wins
+            totals["losses"] += losses
+
+            session_remaining -= chunk_dur
+
+            print(
+                f"  Chunk {chunk_index}: net={net:+.4f} trades={trades} wins={wins} losses={losses} "
+                f"remaining={max(0, session_remaining)//60}min"
+            )
+
+            # Empty delta and dead server means likely crash before DELTA flush; recover now.
+            if not delta and proc.poll() is not None:
+                crashes += 1
+                print("  Harness returned empty DELTA and server is down; restarting server...")
+                kill_server(PORT)
+                proc = start_server(v)
+                if wait_for_server(PORT, timeout=40):
+                    print("  Server restart successful.")
+                else:
+                    print("  Server restart failed; will retry on next chunk.")
+                    crashes += 1
+
+            save_status(totals, session, int(time.time() - wall_start), DURATION)
+
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        kill_server(PORT)
+
+        print(
+            f"  Session {session} result: net={session_net:+.4f}  trades={session_trades}  "
+            f"wins={session_wins}  losses={session_losses}"
+        )
+
+        if time.time() < wall_end - 10:
+            time.sleep(5)
+
+    trades = totals["trades"]
+    win_rate = (totals["wins"] / trades * 100) if trades > 0 else 0.0
+    fee_drag = totals["ex_fee"] - totals["net"]
     print("\n" + "=" * 80)
-    print("OVERNIGHT RESULT")
+    print("OVERNIGHT FINAL RESULT")
     print("=" * 80)
-    print(f"  net={net:+.4f}  ex_fee={ex_fee:+.4f}  fee_drag={fee_drag:.4f}")
-    print(f"  trades={trades}  wins={wins}  losses={losses}  win_rate={win_rate:.1f}%")
-    verdict = "PROFITABLE ✓" if net > 0 else "LOSS ✗"
-    print(f"  verdict={verdict}")
+    print(f"  net={totals['net']:+.4f}  ex_fee={totals['ex_fee']:+.4f}  fee_drag={fee_drag:.4f}")
+    print(f"  trades={trades}  wins={totals['wins']}  losses={totals['losses']}  win_rate={win_rate:.1f}%")
+    print(f"  sessions={session}  crashes={crashes}")
+    print(f"  verdict={'PROFITABLE' if totals['net'] > 0 else 'LOSS'}")
     print("=" * 80)
-    print(f"Full log: {log_path}")
 
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     summary = {
-        "timestamp": ts,
-        "duration_s": DURATION,
-        "variant": v["name"],
-        "net": net, "ex_fee": ex_fee, "fee_drag": fee_drag,
-        "trades": trades, "wins": wins, "losses": losses, "win_rate_pct": win_rate,
+        "timestamp": ts, "duration_s": DURATION, "variant": v["name"],
+        "sessions": session, "crashes": crashes,
+        "net": totals["net"], "ex_fee": totals["ex_fee"], "fee_drag": fee_drag,
+        "trades": trades, "wins": totals["wins"], "losses": totals["losses"],
+        "win_rate_pct": round(win_rate, 1),
     }
     out_path = f"/tmp/overnight_result_{ts}.json"
-    with open(out_path, "w") as f:
-        json.dump(summary, f, indent=2)
-    with open("/tmp/overnight_latest.json", "w") as f:
-        json.dump(summary, f, indent=2)
-    print(f"Result saved → {out_path}")
+    for path in [out_path, "/tmp/overnight_latest.json"]:
+        with open(path, "w") as f:
+            json.dump(summary, f, indent=2)
+    print(f"Result saved -> {out_path}")
 
 
 if __name__ == "__main__":
