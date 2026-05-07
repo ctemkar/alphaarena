@@ -375,4 +375,7 @@ def main():
 
 
 if __name__ == "__main__":
+    # Write PID file so watchdog can check liveness
+    with open("/tmp/v2sweep.pid", "w") as _pf:
+        _pf.write(str(os.getpid()))
     main()
