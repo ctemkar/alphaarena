@@ -47,6 +47,18 @@ VARIANTS = [
 ]
 
 
+def notify(title: str, msg: str):
+    """Fire a macOS notification. No-op if osascript unavailable."""
+    try:
+        subprocess.run(
+            ["osascript", "-e",
+             f'display notification "{msg}" with title "{title}" sound name "Glass"'],
+            timeout=5, capture_output=True,
+        )
+    except Exception:
+        pass
+
+
 def pid_alive(pid):
     if pid <= 0:
         return False
@@ -200,6 +212,7 @@ def run_variant(v, vi):
     totals = {"net": 0.0, "ex_fee": 0.0, "trades": 0, "wins": 0, "losses": 0}
     crashes = 0
     kill_switch_fired = False
+    notified_positive = False
 
     end_dt = datetime.datetime.now() + datetime.timedelta(seconds=VARIANT_DURATION)
     print(f"\n{'='*80}")
@@ -280,6 +293,14 @@ def run_variant(v, vi):
                     print("  Restart OK.")
                 else:
                     crashes += 1
+
+            # Notify when net first goes positive
+            if not notified_positive and totals["net"] > 0:
+                notified_positive = True
+                notify(
+                    "Alpha Arena — Paper +ve 🟢",
+                    f"{v['name']} net={totals['net']:+.2f} trades={totals['trades']}",
+                )
 
             # Kill-switch
             if totals["trades"] < KILL_GATE and totals["net"] <= KILL_THRESHOLD:
@@ -364,6 +385,16 @@ def main():
 
     best = max(results, key=lambda x: x["net"])
     print(f"\n  BEST: {best['name']}  net={best['net']:+.4f}")
+    if best["net"] > 0:
+        notify(
+            "Alpha Arena — Sweep Complete ✅",
+            f"Best: {best['name']}  net={best['net']:+.2f}  wr={best['win_rate_pct']}%",
+        )
+    else:
+        notify(
+            "Alpha Arena — Sweep Complete ❌",
+            f"All variants negative. Best net={best['net']:+.2f}",
+        )
 
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     summary_path = f"/tmp/v2sweep_summary_{ts}.json"
