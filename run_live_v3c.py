@@ -208,16 +208,17 @@ try:
                     print(f"  Chunk {session_chunks_completed}: net=+0.0000 trades=0 wins=0 losses=0 remaining={int(session_remaining/60)}min")
                     continue
 
-            net = chunk_result.get("net_usd", 0.0)
-            trades = chunk_result.get("trades", 0)
-            wins = chunk_result.get("wins", 0)
-            losses = chunk_result.get("losses", 0)
+            net = chunk_result.get("delta_net_pnl", 0.0)
+            trades = chunk_result.get("delta_trades", 0)
+            wins = chunk_result.get("delta_wins", 0)
+            losses = chunk_result.get("delta_losses", 0)
+            ex_fee = chunk_result.get("delta_ex_fee_pnl", 0.0)
 
             totals["net"] += net
             totals["trades"] += trades
             totals["wins"] += wins
             totals["losses"] += losses
-            totals["ex_fee"] += chunk_result.get("ex_fee_usd", 0.0)
+            totals["ex_fee"] += ex_fee
 
             wall_elapsed_min = int((time.time() - start_wall_time) / 60)
             remaining_min = int((DURATION - (time.time() - start_wall_time)) / 60)
