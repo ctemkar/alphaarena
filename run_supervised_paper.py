@@ -70,13 +70,16 @@ def kill_server(port):
     time.sleep(1)
 
 
+SERVER_LOG = "/tmp/supervised_server.log"
+
 def start_server(v):
+    server_log_fh = open(SERVER_LOG, "a")
     return subprocess.Popen(
         ["python3", "quantplot_ai_server.py"],
         env=build_env(v),
         cwd=Path(__file__).parent,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=server_log_fh,
+        stderr=server_log_fh,
     )
 
 
