@@ -14,7 +14,7 @@ import urllib.request
 from pathlib import Path
 
 WATCH_PID = int(os.getenv("WATCH_PID", "0"))
-DURATION = int(os.getenv("ALPHA_OVERNIGHT_DURATION", str(2 * 3600)))  # 2h validation
+DURATION = int(os.getenv("ALPHA_OVERNIGHT_DURATION", str(8 * 3600)))  # 8h overnight
 SESSION_MAX = int(os.getenv("ALPHA_SESSION_MAX", str(2 * 3600)))
 SUPERVISOR_CHUNK_SECONDS = int(os.getenv("ALPHA_SUPERVISOR_CHUNK", "300"))
 KILL_SWITCH_THRESHOLD = float(os.getenv("ALPHA_KILL_SWITCH_THRESHOLD", "-15.0"))
