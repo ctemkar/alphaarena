@@ -23,17 +23,17 @@ PORT = 8001
 STATUS_PATH = "/tmp/overnight_status.json"
 
 VARIANT = {
-    "name": "OVERNIGHT-V2 (thr=0.03% TP=10 SL=6)",
+    "name": "OVERNIGHT-V3C (thr=0.05% TP=10 SL=6)",
     "port": PORT,
     "model": "Llama-3.2",
     "desk": "btc",
-    "edge": 0.030,
+    "edge": 0.050,
     "persistence": 1,
     "reversal": 1.0,
     "size_usd": 5000,
     "force_close_on_hold": "1",
     "momentum_override": "0",
-    "momentum_threshold": 0.030,
+    "momentum_threshold": 0.050,
     "signal_strategy": "deterministic_reversal",
     "det_move_window": "20",
     "hold_cooldown_ticks": "6",
@@ -383,6 +383,21 @@ def main():
             json.dump(summary, f, indent=2)
     print(f"Result saved -> {out_path}")
 
+    # macOS notification
+    verdict = "PROFITABLE ✅" if totals["net"] > 0 else "LOSS ❌"
+    notif_msg = f"net={totals['net']:+.2f}  trades={trades}  wr={win_rate:.0f}%  {verdict}"
+    try:
+        subprocess.run(
+            ["osascript", "-e",
+             f'display notification "{notif_msg}" with title "Alpha Arena — Overnight Done" sound name "Glass"'],
+            timeout=5, capture_output=True,
+        )
+    except Exception:
+        pass
+
 
 if __name__ == "__main__":
+    # Write PID file so watchdog can check liveness
+    with open("/tmp/overnight_v3c.pid", "w") as _pf:
+        _pf.write(str(os.getpid()))
     main()
