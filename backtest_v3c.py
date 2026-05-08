@@ -251,12 +251,12 @@ def main():
             print(f"  {r['variant']:<40} {r['trades']:>7} {r['win_rate']:>5.0f}% {r['net_pnl']:>+8.2f} {r['pnl_per_4h']:>+8.2f} {r['sharpe']:>7.2f} {r['max_drawdown']:>7.2f}")
 
     print(f"\n  Live results from sweep (4h each, paper, BTC ~$79k):")
-    print(f"  {'A (0.03% TP10 SL6)':<40} {'9':>7} {'11%':>5} {'-15.26':>+8} {'-15.26':>+8} {'—':>7} {'—':>7}  ← kill-switch")
-    print(f"  {'B (0.03% TP15 SL6)':<40} {'10':>7} {'40%':>5} {'+1.74':>+8} {'+1.74':>+8} {'—':>7} {'—':>7}")
-    print(f"  {'C (0.05% TP10 SL6)':<40} {'10':>7} {'30%':>5} {'+3.41':>+8} {'+3.41':>+8} {'—':>7} {'—':>7}  ← sweep winner")
+    print(f"  {'A (0.03% TP10 SL6)':<40} {'9':>7} {'11%':>5} {'$-15.26':>8} {'$-15.26':>8} {'—':>7} {'—':>7}  <- kill-switch")
+    print(f"  {'B (0.03% TP15 SL6)':<40} {'10':>7} {'40%':>5} {'$+1.74':>8} {'$+1.74':>8} {'—':>7} {'—':>7}")
+    print(f"  {'C (0.05% TP10 SL6)':<40} {'10':>7} {'30%':>5} {'$+3.41':>8} {'$+3.41':>8} {'—':>7} {'—':>7}  <- sweep winner")
 
     print(f"\n  Baseline 12h overnight (previous session):")
-    print(f"  {'OVERNIGHT-V2 (0.03% TP10 SL6)':<40} {'21':>7} {'19%':>5} {'+4.34':>+8} {'+1.45':>+8} {'—':>7} {'—':>7}")
+    print(f"  {'OVERNIGHT-V2 (0.03% TP10 SL6)':<40} {'21':>7} {'19%':>5} {'$+4.34':>8} {'$+1.45':>8} {'—':>7} {'—':>7}")
 
     print(f"\n  Recommendation based on backtest + live sweep:")
     best = [r for r in results if r.get("trades", 0) > 0]
