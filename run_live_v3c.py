@@ -25,18 +25,18 @@ PORT = 8001
 STATUS_PATH = "/tmp/live_v3c_status.json"
 
 VARIANT = {
-    "name": "LIVE-V3C-PILOT (thr=0.03% TP=10 SL=6 size=$1k)",
+    "name": "LIVE-V3C-PILOT (thr=0.01% TP=10 SL=6 size=$1k)",
     "port": PORT,
     "mode": "LIVE",  # Key: LIVE not PAPER
     "model": "Llama-3.2",
     "desk": "btc",
-    "edge": 0.030,
+    "edge": 0.010,
     "persistence": 1,
     "reversal": 1.0,
     "size_usd": 1000,  # Conservative: 1/5 of paper size
     "force_close_on_hold": "1",
     "momentum_override": "0",
-    "momentum_threshold": 0.030,
+    "momentum_threshold": 0.010,
     "signal_strategy": "deterministic_reversal",
     "det_move_window": "20",
     "hold_cooldown_ticks": "6",
@@ -52,7 +52,7 @@ VARIANT = {
 
 print("""
 ================================================================================
-LIVE TRADING RUN: LIVE-V3C-PILOT (thr=0.03% TP=10 SL=6)
+LIVE TRADING RUN: LIVE-V3C-PILOT (thr=0.01% TP=10 SL=6)
 Total: 2h  |  Session max: 2h  |  Chunk: 300s  |  Size: $1k  |  DailyLoss: $100
 Kill-switch: stop if net <= -15.0 before 20 trades
 Risk Policy: Hard $100/day loss limit enforced server-side
