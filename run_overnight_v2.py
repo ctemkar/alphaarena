@@ -60,7 +60,14 @@ def pid_alive(pid):
 def kill_server(port):
     os.system(f"lsof -ti:{port} 2>/dev/null | xargs kill -9 2>/dev/null")
     os.system("pkill -f quantplot_ai_server.py 2>/dev/null")
-    time.sleep(2)
+    # Wait until port is actually free (OS needs time to release it)
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        result = os.system(f"lsof -ti:{port} >/dev/null 2>&1")
+        if result != 0:  # lsof returns non-zero when port is free
+            break
+        time.sleep(0.5)
+    time.sleep(1)
 
 
 def start_server(v):
