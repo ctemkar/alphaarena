@@ -14,7 +14,7 @@ import urllib.request
 from pathlib import Path
 
 WATCH_PID = int(os.getenv("WATCH_PID", "0"))
-DURATION = int(os.getenv("ALPHA_OVERNIGHT_DURATION", str(12 * 3600)))
+DURATION = int(os.getenv("ALPHA_OVERNIGHT_DURATION", str(2 * 3600)))  # 2h validation
 SESSION_MAX = int(os.getenv("ALPHA_SESSION_MAX", str(2 * 3600)))
 SUPERVISOR_CHUNK_SECONDS = int(os.getenv("ALPHA_SUPERVISOR_CHUNK", "300"))
 KILL_SWITCH_THRESHOLD = float(os.getenv("ALPHA_KILL_SWITCH_THRESHOLD", "-15.0"))
@@ -23,17 +23,17 @@ PORT = 8001
 STATUS_PATH = "/tmp/supervised_paper_status.json"
 
 VARIANT = {
-    "name": "OVERNIGHT-V3C (thr=0.05% TP=10 SL=6)",
+    "name": "QUICK-V3C-LO (thr=0.03% TP=10 SL=6)",
     "port": PORT,
     "model": "Llama-3.2",
     "desk": "btc",
-    "edge": 0.050,
+    "edge": 0.030,
     "persistence": 1,
     "reversal": 1.0,
     "size_usd": 5000,
     "force_close_on_hold": "1",
     "momentum_override": "0",
-    "momentum_threshold": 0.050,
+    "momentum_threshold": 0.030,
     "signal_strategy": "deterministic_reversal",
     "det_move_window": "20",
     "hold_cooldown_ticks": "6",
@@ -71,11 +71,12 @@ def kill_server(port):
 
 
 SERVER_LOG = "/tmp/supervised_server.log"
+PYTHON_BIN = "/opt/homebrew/bin/python3"  # 3.14, supports list[dict]|None syntax
 
 def start_server(v):
     server_log_fh = open(SERVER_LOG, "a")
     return subprocess.Popen(
-        ["python3", "quantplot_ai_server.py"],
+        [PYTHON_BIN, "quantplot_ai_server.py"],
         env=build_env(v),
         cwd=Path(__file__).parent,
         stdout=server_log_fh,
