@@ -4,8 +4,8 @@
 #   */5 * * * * /Users/chetantemkar/development/alphaarena/watchdog_sweep.sh
 
 SCRIPT_DIR="/Users/chetantemkar/development/alphaarena"
-PID_FILE="/tmp/overnight_v3c.pid"
-LOG_FILE="/tmp/overnight_v3c_run.log"
+PID_FILE="/tmp/supervised_paper.pid"
+LOG_FILE="/tmp/supervised_paper_run.log"
 WATCHDOG_LOG="/tmp/overnight_v3c_watchdog.log"
 
 is_alive() {
@@ -32,6 +32,6 @@ fi
 
 echo "$(date '+%H:%M:%S') overnight not running — restarting..." >> "$WATCHDOG_LOG"
 cd "$SCRIPT_DIR" || exit 1
-nohup python3 -u run_overnight_v2.py >> "$LOG_FILE" 2>&1 &
+nohup python3 -u run_supervised_paper.py >> "$LOG_FILE" 2>&1 &
 echo $! > "$PID_FILE"
 echo "$(date '+%H:%M:%S') restarted with pid=$(cat $PID_FILE)" >> "$WATCHDOG_LOG"
